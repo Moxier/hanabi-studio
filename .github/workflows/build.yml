@@ -1,0 +1,48 @@
+# Builds Hanabi Studio for Linux and Windows 10/11 on every push, and attaches zip files to a
+# GitHub release when a tag like v0.2.0 is pushed.
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x86_64
+            exe: hanabi-studio
+          - os: windows-2022
+            name: windows-x86_64
+            exe: hanabi-studio.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libxkbcommon-dev
+      - name: Build
+        run: cargo build --release
+      - name: Tests
+        run: cargo test --release
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist/hanabi-studio
+          cp target/release/${{ matrix.exe }} dist/hanabi-studio/
+          cp LICENSE README.md THIRD-PARTY.md dist/hanabi-studio/
+          cp -r samples dist/hanabi-studio/
+          cd dist && 7z a ../hanabi-studio-${{ matrix.name }}.zip hanabi-studio
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hanabi-studio-${{ matrix.name }}
+          path: hanabi-studio-${{ matrix.name }}.zip
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hanabi-studio-${{ matrix.name }}.zip

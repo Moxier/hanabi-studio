@@ -1,0 +1,7 @@
+target/
+shots/
+# personal projects, autosaves and backups
+save.hproj
+*.autosave.hproj
+*.hproj.bak
+*.hproj.saving
