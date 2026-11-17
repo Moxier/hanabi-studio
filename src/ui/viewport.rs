@@ -271,6 +271,10 @@ impl App {
     }
 
     fn gizmo_and_bones(&mut self, ui: &mut egui::Ui, resp: &egui::Response, proj: &Projector, painter: &egui::Painter, rect: Rect) {
+        // Working on the camera: the model's bones stay out of the way.
+        if self.sel_camera {
+            return;
+        }
         let Some(mi) = self.scene.selected else { return };
         if mi >= self.scene.models.len() || self.scene.models[mi].is_accessory() {
             return;
@@ -320,7 +324,7 @@ impl App {
                     continue;
                 }
                 let Some(sp) = screen[i] else { continue };
-                let sel = self.sel_bone == Some(i);
+                let sel = self.is_bone_selected(mi, i);
                 let hov = hover_bone == Some(i);
                 let keyed = model.motion.bone_key_at(&b.name, self.scene.frame.round() as u32);
                 let base = if b.ik.is_some() {
@@ -330,8 +334,9 @@ impl App {
                 } else {
                     Color32::from_rgb(150, 200, 255)
                 };
-                let col = if sel { theme::ACCENT } else if hov { Color32::WHITE } else { base };
-                let r = if sel { 6.0 } else { 4.5 };
+                let active = self.sel_bone == Some(i);
+                let col = if active { theme::ACCENT } else if sel { Color32::from_rgb(255, 150, 190) } else if hov { Color32::WHITE } else { base };
+                let r = if active { 6.0 } else if sel { 5.5 } else { 4.5 };
                 if b.ik.is_some() {
                     painter.rect_filled(Rect::from_center_size(sp, vec2(r * 2.0, r * 2.0)), 1.0, col);
                 } else {
@@ -347,7 +352,8 @@ impl App {
         let Some(bi) = self.sel_bone.filter(|&b| b < nb) else {
             if resp.clicked() {
                 if let Some(h) = hover_bone {
-                    self.sel_bone = Some(h);
+                    let mods = ui.input(|i| i.modifiers);
+                    self.click_bone(h, mods);
                 }
             }
             return;
@@ -506,7 +512,8 @@ impl App {
         }
         if resp.clicked() && hover_axis.is_none() {
             if let Some(h) = hover_bone {
-                self.sel_bone = Some(h);
+                let mods = ui.input(|i| i.modifiers);
+                self.click_bone(h, mods);
             }
         }
         let _ = RichText::new("");

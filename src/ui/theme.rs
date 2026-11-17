@@ -130,3 +130,17 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .show(ui, add)
         .inner
 }
+
+/// Double-click a slider or value to put it back to its default (marks the response changed).
+pub fn dbl<T: PartialEq + Copy>(mut r: egui::Response, v: &mut T, default: T) -> egui::Response {
+    if r.double_clicked() && *v != default {
+        *v = default;
+        r.mark_changed();
+    }
+    r
+}
+
+/// A label that resets something when double-clicked (for value fields that edit on click).
+pub fn reset_label(ui: &mut egui::Ui, text: egui::RichText) -> bool {
+    ui.add(egui::Label::new(text).sense(egui::Sense::click())).on_hover_text("Double-click to reset").double_clicked()
+}

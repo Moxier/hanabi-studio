@@ -17,6 +17,10 @@ fn wheel(ui: &mut egui::Ui, label: &str, value: &mut [f32; 3], range: f32) -> bo
         ui.label(RichText::new(label).strong());
         let size = 118.0;
         let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click_and_drag());
+        if resp.double_clicked() {
+            *value = [0.0; 3];
+            changed = true;
+        }
         let c = rect.center();
         let r = size * 0.5 - 4.0;
         let p = ui.painter_at(rect.expand(2.0));
@@ -125,15 +129,15 @@ impl App {
             ui.vertical(|ui| {
                 ui.spacing_mut().slider_width = 190.0;
                 ui.label(RichText::new("Tone").strong());
-                ui.add(egui::Slider::new(&mut g.exposure, -3.0..=3.0).text("Exposure").suffix(" EV"));
-                ui.add(egui::Slider::new(&mut g.contrast, 0.5..=1.6).text("Contrast"));
-                ui.add(egui::Slider::new(&mut g.highlights, -1.0..=1.0).text("Highlights"));
-                ui.add(egui::Slider::new(&mut g.shadows, -1.0..=1.0).text("Shadows"));
+                theme::dbl(ui.add(egui::Slider::new(&mut g.exposure, -3.0..=3.0).text("Exposure").suffix(" EV")), &mut g.exposure, 0.0);
+                theme::dbl(ui.add(egui::Slider::new(&mut g.contrast, 0.5..=1.6).text("Contrast")), &mut g.contrast, 1.0);
+                theme::dbl(ui.add(egui::Slider::new(&mut g.highlights, -1.0..=1.0).text("Highlights")), &mut g.highlights, 0.0);
+                theme::dbl(ui.add(egui::Slider::new(&mut g.shadows, -1.0..=1.0).text("Shadows")), &mut g.shadows, 0.0);
                 ui.label(RichText::new("Colour").strong());
-                ui.add(egui::Slider::new(&mut g.temperature, -1.0..=1.0).text("Temperature"));
-                ui.add(egui::Slider::new(&mut g.tint, -1.0..=1.0).text("Tint"));
-                ui.add(egui::Slider::new(&mut g.saturation, 0.0..=2.0).text("Saturation"));
-                ui.add(egui::Slider::new(&mut g.vibrance, -1.0..=1.0).text("Vibrance"));
+                theme::dbl(ui.add(egui::Slider::new(&mut g.temperature, -1.0..=1.0).text("Temperature")), &mut g.temperature, 0.0);
+                theme::dbl(ui.add(egui::Slider::new(&mut g.tint, -1.0..=1.0).text("Tint")), &mut g.tint, 0.0);
+                theme::dbl(ui.add(egui::Slider::new(&mut g.saturation, 0.0..=2.0).text("Saturation")), &mut g.saturation, 1.0);
+                theme::dbl(ui.add(egui::Slider::new(&mut g.vibrance, -1.0..=1.0).text("Vibrance")), &mut g.vibrance, 0.0);
             });
         });
     }
@@ -176,7 +180,7 @@ impl App {
                     ui.selectable_value(&mut self.grade.look, i, *l);
                 }
             });
-            ui.add(egui::Slider::new(&mut self.grade.look_strength, 0.0..=1.0).text("Strength"));
+            theme::dbl(ui.add(egui::Slider::new(&mut self.grade.look_strength, 0.0..=1.0).text("Strength")), &mut self.grade.look_strength, 1.0);
         });
         theme::section(ui, "LUT (.cube)");
         theme::card(ui, |ui| {

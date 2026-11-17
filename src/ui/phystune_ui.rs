@@ -81,9 +81,10 @@ impl App {
     }
 
     fn physics_global_ui(&mut self, ui: &mut egui::Ui) {
+        let dflt = crate::physics::PhysicsCfg::default();
         let c = &mut self.scene.physics_cfg;
         theme::section(ui, "Simulation (live)");
-        ui.add(egui::Slider::new(&mut c.gravity, 0.0..=300.0).text("Gravity"));
+        theme::dbl(ui.add(egui::Slider::new(&mut c.gravity, 0.0..=300.0).text("Gravity")), &mut c.gravity, dflt.gravity);
         ui.horizontal(|ui| {
             ui.label("Gravity direction");
             for v in c.gravity_dir.iter_mut() {
@@ -108,15 +109,15 @@ impl App {
         ui.add_enabled(follow, egui::Slider::new(&mut self.scene.stage.physics_substeps, 1..=8).text("Sub-steps per frame"))
             .on_disabled_hover_text("Used with “Follow frame rate”");
         let c = &mut self.scene.physics_cfg;
-        ui.add(egui::Slider::new(&mut c.damping_mul, 0.0..=3.0).text("Damping ×").step_by(0.05)).on_hover_text("Multiplies every part's damping: higher = calmer, less swinging");
-        ui.add(egui::Slider::new(&mut c.spring_mul, 0.0..=4.0).text("Spring stiffness ×").step_by(0.05)).on_hover_text("Multiplies every joint spring: higher = parts spring back to shape faster");
+        theme::dbl(ui.add(egui::Slider::new(&mut c.damping_mul, 0.0..=3.0).text("Damping ×").step_by(0.05)).on_hover_text("Multiplies every part's damping: higher = calmer, less swinging"), &mut c.damping_mul, 1.0);
+        theme::dbl(ui.add(egui::Slider::new(&mut c.spring_mul, 0.0..=4.0).text("Spring stiffness ×").step_by(0.05)).on_hover_text("Multiplies every joint spring: higher = parts spring back to shape faster"), &mut c.spring_mul, 1.0);
         theme::section(ui, "Wind");
-        ui.add(egui::Slider::new(&mut c.wind_strength, 0.0..=200.0).text("Strength"));
-        ui.add(egui::Slider::new(&mut c.wind_dir, -180.0..=180.0).text("Direction (°)"));
-        ui.add(egui::Slider::new(&mut c.wind_gusts, 0.0..=1.0).text("Gusts (noise)"));
-        ui.add(egui::Slider::new(&mut c.air_drag, 0.0..=1.0).text("Air drag"));
+        theme::dbl(ui.add(egui::Slider::new(&mut c.wind_strength, 0.0..=200.0).text("Strength")), &mut c.wind_strength, 0.0);
+        theme::dbl(ui.add(egui::Slider::new(&mut c.wind_dir, -180.0..=180.0).text("Direction (°)")), &mut c.wind_dir, 0.0);
+        theme::dbl(ui.add(egui::Slider::new(&mut c.wind_gusts, 0.0..=1.0).text("Gusts (noise)")), &mut c.wind_gusts, dflt.wind_gusts);
+        theme::dbl(ui.add(egui::Slider::new(&mut c.air_drag, 0.0..=1.0).text("Air drag")), &mut c.air_drag, 0.0);
         theme::section(ui, "Stability");
-        ui.add(egui::Slider::new(&mut c.max_speed, 20.0..=1000.0).logarithmic(true).text("Speed limit"));
+        theme::dbl(ui.add(egui::Slider::new(&mut c.max_speed, 20.0..=1000.0).logarithmic(true).text("Speed limit")), &mut c.max_speed, dflt.max_speed);
         ui.horizontal(|ui| {
             ui.label("After a sudden big move");
             egui::ComboBox::from_id_salt("bigmove")
@@ -131,8 +132,8 @@ impl App {
                     ui.selectable_value(&mut c.big_move, BigMove::Off, "Do nothing");
                 });
         });
-        ui.add(egui::Slider::new(&mut c.big_move_dist, 0.5..=30.0).text("Big move = more than (units/frame)"));
-        ui.add(egui::Slider::new(&mut c.settle_steps, 0..=200).text("Settle steps after a jump"));
+        theme::dbl(ui.add(egui::Slider::new(&mut c.big_move_dist, 0.5..=30.0).text("Big move = more than (units/frame)")), &mut c.big_move_dist, dflt.big_move_dist);
+        theme::dbl(ui.add(egui::Slider::new(&mut c.settle_steps, 0..=200).text("Settle steps after a jump")), &mut c.settle_steps, dflt.settle_steps);
         ui.horizontal(|ui| {
             if ui.button("Defaults").on_hover_text("Scene physics settings back to their defaults (part tweaks stay)").clicked() {
                 self.scene.physics_cfg = Default::default();

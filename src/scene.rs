@@ -383,7 +383,7 @@ pub struct CameraState {
 
 impl Default for CameraState {
     fn default() -> Self {
-        Self { target: Vec3::new(0.0, 10.0, 0.0), rot: Vec3::new(0.12, 0.35, 0.0), distance: -42.0, fov: 30.0, ortho: false }
+        Self { target: Vec3::new(0.0, 10.0, 0.0), rot: Vec3::ZERO, distance: -42.0, fov: 30.0, ortho: false }
     }
 }
 

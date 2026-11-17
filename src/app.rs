@@ -144,6 +144,13 @@ pub struct App {
     pub viewport_tex: Option<(glow::Texture, egui::TextureId)>,
     pub ws: Workspace,
     pub sel_bone: Option<usize>,
+    /// Other selected bones (model id, bone indices); the active bone is `sel_bone`.
+    pub sel_bones: (u64, std::collections::BTreeSet<usize>),
+    /// Inspector tab in the Animation workspace: 0 pose, 1 expressions, 2 tools.
+    pub insp_tab: u8,
+    pub bone_search: String,
+    pub morph_search: String,
+    pub tool: crate::ui::animtools::ToolParams,
     pub sel_morph: Option<usize>,
     pub sel_camera: bool,
     pub sel_keys: Vec<(TrackId, u32)>,
@@ -311,6 +318,11 @@ impl App {
             viewport_tex: None,
             ws,
             sel_bone: None,
+            sel_bones: (0, Default::default()),
+            insp_tab: 0,
+            bone_search: String::new(),
+            morph_search: String::new(),
+            tool: Default::default(),
             sel_morph: None,
             sel_camera: false,
             sel_keys: Vec::new(),
@@ -414,6 +426,22 @@ impl App {
             Some("credits") => app.show_credits = true,
             Some("video-help") => app.show_video_help = true,
             Some("physics") => app.show_physics = true,
+            Some("pose") | Some("tools") | Some("expressions") => {
+                // Animation inspector tabs with a few bones picked (for pictures).
+                app.insp_tab = match args.show.as_deref() {
+                    Some("tools") => 2,
+                    Some("expressions") => 1,
+                    _ => 0,
+                };
+                if let Some(mi) = app.anim_model() {
+                    if let Some(b) = app.scene.models[mi].data.bone_index("左腕") {
+                        app.sel_bone = Some(b);
+                        app.select_op(crate::ui::animtools::SelOp::Mirror);
+                        app.sel_bone = Some(b);
+                    }
+                }
+            }
+            Some("camera") => app.sel_camera = true,
             Some("physics-parts") => {
                 // Parts tab with the selected model's first simulated body picked and the
                 // wireframes on (for pictures of the tuning panel).
@@ -1017,6 +1045,12 @@ impl App {
                         self.delete_selected_keys();
                     }
                 }
+                // Blender-style selection and resets (Animation workspace).
+                Key::A if !cmd && m.alt && self.ws == Workspace::Animation => self.select_op(crate::ui::animtools::SelOp::None),
+                Key::A if !cmd && !m.alt && self.ws == Workspace::Animation => self.select_op(crate::ui::animtools::SelOp::All),
+                Key::I if cmd && self.ws == Workspace::Animation => self.select_op(crate::ui::animtools::SelOp::Invert),
+                Key::R if m.alt => self.reset_selected(false, true),
+                Key::G if m.alt => self.reset_selected(true, false),
                 Key::R => self.gizmo = GizmoMode::Rotate,
                 Key::T | Key::G => self.gizmo = GizmoMode::Move,
                 Key::K => self.auto_key = !self.auto_key,
@@ -1254,6 +1288,10 @@ impl App {
                         ("↑ / ↓", "Next / previous key of the selected bone"),
                         ("Enter", "Register a key for the selected bone or morph"),
                         ("R / T", "Rotate / move gizmo"),
+                        ("Ctrl/Shift + click", "Select several bones (view or list)"),
+                        ("A / Alt+A / Ctrl+I", "Select all / none / invert bones"),
+                        ("Alt+R / Alt+G", "Reset rotation / position of the selected bones"),
+                        ("Double-click", "Reset a slider (or a value's label) to its default"),
                         ("K", "Toggle auto-key"),
                         ("Ctrl+C / Ctrl+V", "Copy / paste keys or pose"),
                         ("Ctrl+Shift+V", "Paste mirrored (left ↔ right)"),

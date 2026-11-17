@@ -23,16 +23,16 @@ impl App {
     pub fn register_selected(&mut self) {
         let frame = self.scene.frame.round() as u32;
         if self.sel_camera {
-            self.checkpoint();
-            let k = self.scene.camera.to_key(frame, [Curve::EASE_IN_OUT; 6]);
-            self.scene.camera_motion.set_camera_key(k);
-            let lk = LightKey { frame, color: self.scene.light.color, direction: self.scene.light.direction };
-            self.scene.camera_motion.set_light_key(lk);
-            self.scene.camera_edited = false;
-            self.scene.light_edited = false;
-            self.set_status(format!("Camera & light key at frame {frame}"));
+            // Enter keys the camera, and the light too only if it was changed.
+            let light = self.scene.light_edited;
+            self.key_camera();
+            if light {
+                self.key_light();
+                self.set_status(format!("Camera and light keys at frame {frame}"));
+            }
             return;
         }
+        let selected = self.selected_bones();
         let Some(mi) = self.scene.selected else { return };
         let curves = [self.default_curve; 4];
         self.checkpoint();
@@ -40,7 +40,7 @@ impl App {
         let mut n = 0;
         // Key every edited bone and morph (and the selected bone even if untouched).
         let mut bones: Vec<usize> = m.pose_edit.keys().copied().collect();
-        if let Some(b) = self.sel_bone {
+        for b in selected {
             if !bones.contains(&b) {
                 bones.push(b);
             }
@@ -229,12 +229,12 @@ impl App {
 
     pub fn reset_pose(&mut self, only_selected: bool) {
         let Some(mi) = self.scene.selected else { return };
-        let m = &mut self.scene.models[mi];
         if only_selected {
-            if let Some(b) = self.sel_bone {
-                m.pose_edit.insert(b, (Vec3::ZERO, Quat::IDENTITY));
-            }
-        } else {
+            self.reset_selected(true, true);
+            return;
+        }
+        let m = &mut self.scene.models[mi];
+        {
             for i in 0..m.data.bones.len() {
                 m.pose_edit.insert(i, (Vec3::ZERO, Quat::IDENTITY));
             }
@@ -251,7 +251,7 @@ impl App {
             self.outliner(ui);
         });
         egui::Panel::right("inspector").resizable(true).default_size(310.0).size_range(260.0..=480.0).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.inspector(ui));
+            self.inspector(ui);
         });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG0)).show(ui, |ui| {
             let rect = ui.max_rect();
@@ -293,12 +293,14 @@ impl App {
                         self.scene.camera_follows_motion = follow;
                     }
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Reset view").clicked() {
-                        self.scene.camera = crate::scene::CameraState::default();
-                        self.scene.camera_edited = !self.scene.camera_motion.camera.is_empty();
-                    }
-                });
+                if ui.button("Reset view").on_hover_text("Target 0, 10, 0 · angle 0, 0, 0").clicked() {
+                    self.scene.camera = crate::scene::CameraState::default();
+                    self.scene.camera_edited = !self.scene.camera_motion.camera.is_empty();
+                }
+                let n = self.selected_bones().len();
+                if !self.sel_camera && n > 1 {
+                    ui.label(RichText::new(format!("{n} bones selected")).size(11.0).color(theme::KEY));
+                }
             });
         });
     }
@@ -308,14 +310,39 @@ impl App {
         ui.separator();
         // Bones by display frame
         let Some(mi) = self.scene.selected.filter(|_| !self.sel_camera) else {
-            ui.label(RichText::new("Select a model to see its bones.").color(theme::TEXT_DIM));
+            ui.label(RichText::new(if self.sel_camera { "Camera selected: bones are hidden. Pick a model to pose it." } else { "Select a model to see its bones." }).color(theme::TEXT_DIM));
             return;
         };
         if mi >= self.scene.models.len() {
             return;
         }
-        theme::section(ui, "Bones & expressions");
+        ui.horizontal(|ui| {
+            theme::section(ui, "Bones & expressions");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("Select ⏷", |ui| {
+                    for (op, label) in [
+                        (crate::ui::animtools::SelOp::All, "All  (A)"),
+                        (crate::ui::animtools::SelOp::None, "None  (Alt+A)"),
+                        (crate::ui::animtools::SelOp::Invert, "Invert  (Ctrl+I)"),
+                        (crate::ui::animtools::SelOp::Mirror, "Add mirror side"),
+                        (crate::ui::animtools::SelOp::Children, "Add children"),
+                        (crate::ui::animtools::SelOp::Parent, "Add parents"),
+                        (crate::ui::animtools::SelOp::Group, "Add same group"),
+                        (crate::ui::animtools::SelOp::Keyed, "Keyed at playhead"),
+                    ] {
+                        if ui.button(label).clicked() {
+                            self.select_op(op);
+                            ui.close();
+                        }
+                    }
+                });
+            });
+        });
+        ui.add(egui::TextEdit::singleline(&mut self.bone_search).hint_text("🔍 Find bone or expression").desired_width(f32::INFINITY));
+        let q = self.bone_search.trim().to_lowercase();
         let frame = self.scene.frame.round() as u32;
+        let mods = ui.input(|i| i.modifiers);
+        let mut clicked_bone = None;
         egui::ScrollArea::vertical().id_salt("bones").show(ui, |ui| {
             let m = &self.scene.models[mi];
             let data = m.data.clone();
@@ -323,8 +350,19 @@ impl App {
                 if fr.items.is_empty() {
                     continue;
                 }
+                let matches = |name: &str| q.is_empty() || name.to_lowercase().contains(&q);
+                let any = fr.items.iter().any(|&(is_m, i)| {
+                    i >= 0 && if is_m { data.morphs.get(i as usize).map(|x| matches(&x.name)).unwrap_or(false) } else { data.bones.get(i as usize).map(|x| matches(&x.name) || matches(&x.name_en)).unwrap_or(false) }
+                });
+                if !any {
+                    continue;
+                }
                 let id = ui.make_persistent_id(("frame", mi, fi));
-                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, fi < 4)
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, fi < 4);
+                if !q.is_empty() {
+                    state.set_open(true);
+                }
+                state
                     .show_header(ui, |ui| {
                         ui.label(RichText::new(&fr.name).strong());
                     })
@@ -336,14 +374,21 @@ impl App {
                             let idx = idx as usize;
                             if is_morph {
                                 let Some(mo) = data.morphs.get(idx) else { continue };
+                                if !matches(&mo.name) {
+                                    continue;
+                                }
                                 let keyed = self.scene.models[mi].motion.morph_key_at(&mo.name, frame);
                                 let label = format!("{} {}", if keyed { "◆" } else { "◇" }, mo.name);
                                 if ui.selectable_label(self.sel_morph == Some(idx) && self.sel_bone.is_none(), label).clicked() {
                                     self.sel_morph = Some(idx);
                                     self.sel_bone = None;
+                                    self.insp_tab = 1;
                                 }
                             } else {
                                 let Some(b) = data.bones.get(idx) else { continue };
+                                if !matches(&b.name) && !matches(&b.name_en) {
+                                    continue;
+                                }
                                 if !self.scene.stage.show_physics_bones && self.scene.models[mi].physics_bones.get(idx).copied().unwrap_or(false) {
                                     continue;
                                 }
@@ -360,217 +405,227 @@ impl App {
                                 } else {
                                     Color32::from_gray(215)
                                 };
+                                let active = self.sel_bone == Some(idx);
                                 let label = RichText::new(format!("{mark}  {}{tag}", b.name)).color(col);
-                                if ui.selectable_label(self.sel_bone == Some(idx), label).clicked() {
-                                    self.sel_bone = Some(idx);
+                                let label = if active { label.strong() } else { label };
+                                if ui.selectable_label(self.is_bone_selected(mi, idx), label).on_hover_text("Ctrl+click: add/remove · Shift+click: add").clicked() {
+                                    clicked_bone = Some(idx);
                                 }
                             }
                         }
                     });
             }
         });
+        if let Some(b) = clicked_bone {
+            self.click_bone(b, mods);
+            self.insp_tab = 0;
+        }
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
         if self.sel_camera {
-            self.camera_inspector(ui);
+            egui::ScrollArea::vertical().show(ui, |ui| self.camera_inspector(ui));
             return;
         }
         let Some(mi) = self.scene.selected.filter(|&i| i < self.scene.models.len()) else {
-            ui.label(RichText::new("Nothing selected").color(theme::TEXT_DIM));
+            ui.add_space(12.0);
+            ui.label(RichText::new("Nothing selected. Pick a model or Camera & Light in the Scene list.").color(theme::TEXT_DIM));
             return;
         };
-        let frame = self.scene.frame.round() as u32;
-        // Model card
-        theme::section(ui, "Model");
-        theme::card(ui, |ui| {
-            let m = &mut self.scene.models[mi];
-            ui.label(RichText::new(m.name()).strong().size(14.0));
-            if !m.data.comment.is_empty() {
-                ui.label(RichText::new(m.data.comment.lines().next().unwrap_or("")).size(11.0).color(theme::TEXT_DIM));
-            }
-            ui.label(RichText::new(format!(
-                "{} vertices · {} bones · {} morphs · {} bodies",
-                m.data.vertices.len(),
-                m.data.bones.len(),
-                m.data.morphs.len(),
-                m.data.rigid_bodies.len()
-            )).size(11.0).color(theme::TEXT_DIM));
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut m.visible, "Visible");
-                ui.checkbox(&mut m.physics_enabled, "Physics");
-            });
-            if !m.is_accessory() {
-                ui.add(egui::Slider::new(&mut m.edge_width, 0.0..=3.0).text("Outline width"));
-            }
-        });
+        self.model_header(ui, mi);
         if self.scene.models[mi].is_accessory() {
-            self.accessory_inspector(ui, mi);
+            egui::ScrollArea::vertical().show(ui, |ui| self.accessory_inspector(ui, mi));
             return;
         }
-        // Bone card
-        if let Some(bi) = self.sel_bone.filter(|&b| b < self.scene.models[mi].data.bones.len()) {
-            theme::section(ui, "Bone");
-            let mut changed = None;
-            theme::card(ui, |ui| {
-                let m = &self.scene.models[mi];
-                let b = &m.data.bones[bi];
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&b.name).strong().size(14.0).color(theme::ACCENT));
-                    if !b.name_en.is_empty() && b.name_en != b.name {
-                        ui.label(RichText::new(&b.name_en).size(11.0).color(theme::TEXT_DIM));
-                    }
-                });
-                let (p, r) = m.bone_pose(bi);
-                let mut e = euler_deg(r);
-                let mut pp = p;
-                if b.rotatable {
-                    ui.label(RichText::new("Rotation (°)").size(11.0).color(theme::TEXT_DIM));
-                    ui.horizontal(|ui| {
-                        let mut ch = false;
-                        for (v, c, n) in [(&mut e.x, theme::AXIS_X, "X"), (&mut e.y, theme::AXIS_Y, "Y"), (&mut e.z, theme::AXIS_Z, "Z")] {
-                            ui.label(RichText::new(n).color(c));
-                            ch |= ui.add(egui::DragValue::new(v).speed(0.5).fixed_decimals(1)).changed();
-                        }
-                        if ch {
-                            changed = Some((pp, quat_from_euler_deg(e)));
-                        }
-                    });
+        // Tabs
+        ui.horizontal(|ui| {
+            for (t, label, tip) in [(0u8, "Pose", "Bone values, keys and curves"), (1u8, "Expressions", "Morph sliders"), (2u8, "Tools", "Selection, multiply/offset, timing")] {
+                let sel = self.insp_tab == t;
+                let b = egui::Button::new(RichText::new(label).size(13.0).color(if sel { Color32::WHITE } else { theme::TEXT_DIM }))
+                    .fill(if sel { theme::ACCENT.linear_multiply(0.35) } else { theme::BG2 })
+                    .min_size(vec2((ui.available_width() - 8.0) / 3.0, 26.0).max(vec2(60.0, 26.0)));
+                if ui.add(b).on_hover_text(tip).clicked() {
+                    self.insp_tab = t;
                 }
-                if b.movable {
-                    ui.label(RichText::new("Position").size(11.0).color(theme::TEXT_DIM));
-                    ui.horizontal(|ui| {
-                        let mut ch = false;
-                        for (v, c, n) in [(&mut pp.x, theme::AXIS_X, "X"), (&mut pp.y, theme::AXIS_Y, "Y"), (&mut pp.z, theme::AXIS_Z, "Z")] {
-                            ui.label(RichText::new(n).color(c));
-                            ch |= ui.add(egui::DragValue::new(v).speed(0.02).fixed_decimals(2)).changed();
-                        }
-                        if ch {
-                            changed = Some((pp, r));
-                        }
-                    });
-                }
-                if b.ik.is_some() {
-                    let mut on = m.skel.ik_enabled[bi];
-                    if ui.checkbox(&mut on, "IK enabled").changed() {
-                        changed = None;
-                        self.scene.models[mi].skel.ik_enabled[bi] = on;
-                    }
-                }
-            });
-            if let Some((p, r)) = changed {
-                self.edit_bone(mi, bi, p, r);
-            }
-            ui.horizontal_wrapped(|ui| {
-                if ui.add(egui::Button::new(RichText::new("◆ Register key  ⏎").color(Color32::BLACK)).fill(theme::KEY)).clicked() {
-                    self.register_selected();
-                }
-                if ui.button("Reset bone").clicked() {
-                    self.reset_pose(true);
-                }
-                let name = self.scene.models[mi].data.bones[bi].name.clone();
-                let has_key = self.scene.models[mi].motion.bone_key_at(&name, frame);
-                if ui.add_enabled(has_key, egui::Button::new("Delete key")).clicked() {
-                    self.checkpoint();
-                    self.scene.models[mi].motion.delete_key(&TrackId::Bone(name), frame);
-                }
-            });
-            self.curve_editor(ui, mi, bi);
-        }
-        // Morphs
-        theme::section(ui, "Expressions (morphs)");
-        theme::card(ui, |ui| {
-            let data = self.scene.models[mi].data.clone();
-            if data.morphs.is_empty() {
-                ui.label(RichText::new("This model has no morphs").color(theme::TEXT_DIM));
-            }
-            for (panel, title) in [(1u8, "Eyebrows"), (2, "Eyes"), (3, "Mouth"), (4, "Other"), (0, "System")] {
-                let list: Vec<usize> = (0..data.morphs.len()).filter(|&i| data.morphs[i].panel == panel).collect();
-                if list.is_empty() {
-                    continue;
-                }
-                egui::CollapsingHeader::new(RichText::new(format!("{title} ({})", list.len())).size(12.0)).default_open(list.len() <= 12).show(ui, |ui| {
-                    for i in list {
-                        let name = data.morphs[i].name.clone();
-                        ui.horizontal(|ui| {
-                            let keyed = self.scene.models[mi].motion.morph_key_at(&name, frame);
-                            let diamond = egui::Button::new(RichText::new(if keyed { "◆" } else { "◇" }).color(if keyed { theme::KEY } else { theme::TEXT_DIM })).frame(false);
-                            if ui.add(diamond).on_hover_text("Register key").clicked() {
-                                self.checkpoint();
-                                self.scene.models[mi].register_morph_key(i, frame);
-                            }
-                            let mut w = self.scene.models[mi].morph_weights[i];
-                            let resp = ui.add(egui::Slider::new(&mut w, 0.0..=1.0).text(&name).fixed_decimals(2));
-                            if resp.changed() {
-                                self.sel_morph = Some(i);
-                                self.scene.models[mi].morph_edit.insert(i, w);
-                                if self.auto_key {
-                                    self.scene.models[mi].morph_weights[i] = w;
-                                    self.scene.models[mi].register_morph_key(i, frame);
-                                }
-                            }
-                        });
-                    }
-                });
             }
         });
-        self.tools_card(ui);
+        ui.add_space(2.0);
+        egui::ScrollArea::vertical().id_salt(("insp", self.insp_tab)).show(ui, |ui| match self.insp_tab {
+            1 => self.morph_tab(ui, mi),
+            2 => self.tools_panel(ui),
+            _ => self.pose_tab(ui, mi),
+        });
     }
 
-    fn tools_card(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, "Quick tools");
+    fn model_header(&mut self, ui: &mut egui::Ui, mi: usize) {
         theme::card(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("⇋ Mirror pose").on_hover_text("Swap left and right").clicked() {
-                    self.mirror_current_pose();
-                }
-                if ui.button("Copy pose").clicked() {
-                    self.sel_keys.clear();
-                    self.copy_keys_or_pose();
-                }
-                if ui.add_enabled(self.pose_clip.is_some(), egui::Button::new("Paste pose")).clicked() {
-                    self.paste_keys_or_pose(false);
-                }
-                if ui.add_enabled(self.pose_clip.is_some(), egui::Button::new("Paste mirrored")).clicked() {
-                    self.paste_keys_or_pose(true);
-                }
-                if ui.button("Reset pose").clicked() {
-                    self.reset_pose(false);
-                }
-                if ui.button("Key all bones").clicked() {
-                    self.key_all_bones();
-                }
-            });
-            ui.separator();
-            ui.label(RichText::new("Generate motion at the playhead").size(11.5).color(theme::TEXT_DIM));
+            ui.set_width(ui.available_width());
+            let m = &mut self.scene.models[mi];
             ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("gen").selected_text(self.gen_kind.label()).show_ui(ui, |ui| {
-                    for g in tools::Generator::ALL {
-                        ui.selectable_value(&mut self.gen_kind, g, g.label());
-                    }
+                ui.add(egui::Label::new(RichText::new(m.name()).strong().size(14.0)).truncate());
+            });
+            egui::CollapsingHeader::new(RichText::new("Model settings").size(11.5)).id_salt(("model_settings", m.id)).show(ui, |ui| {
+                if !m.data.comment.is_empty() {
+                    ui.label(RichText::new(m.data.comment.lines().next().unwrap_or("")).size(11.0).color(theme::TEXT_DIM));
+                }
+                ui.label(RichText::new(format!(
+                    "{} vertices · {} bones · {} morphs · {} bodies",
+                    m.data.vertices.len(),
+                    m.data.bones.len(),
+                    m.data.morphs.len(),
+                    m.data.rigid_bodies.len()
+                )).size(11.0).color(theme::TEXT_DIM));
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut m.visible, "Visible");
+                    ui.checkbox(&mut m.physics_enabled, "Physics");
                 });
-                ui.add(egui::DragValue::new(&mut self.gen_length).range(10..=3000).suffix(" fr"));
+                if !m.is_accessory() {
+                    let r = ui.add(egui::Slider::new(&mut m.edge_width, 0.0..=3.0).text("Outline width"));
+                    theme::dbl(r, &mut m.edge_width, 1.0);
+                }
             });
+        });
+    }
+
+    fn pose_tab(&mut self, ui: &mut egui::Ui, mi: usize) {
+        let frame = self.scene.frame.round() as u32;
+        let selected = self.selected_bones();
+        let Some(bi) = self.sel_bone.filter(|&b| b < self.scene.models[mi].data.bones.len()) else {
+            theme::card(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("No bone selected").strong());
+                ui.label(RichText::new("Click a bone in the view or in the list. Ctrl+click or Shift+click to pick several; A selects all.").size(11.0).color(theme::TEXT_DIM));
+            });
+            return;
+        };
+        let mut changed = None;
+        theme::card(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let m = &self.scene.models[mi];
+            let b = &m.data.bones[bi];
             ui.horizontal(|ui| {
-                if self.gen_kind == tools::Generator::Bounce {
-                    ui.add(egui::DragValue::new(&mut self.gen_bpm).range(40.0..=240.0).suffix(" BPM"));
-                }
-                if ui.button("✨ Generate").clicked() {
-                    self.generate_motion(self.gen_kind, self.scene.frame.round() as u32, self.gen_length, self.gen_bpm);
+                ui.label(RichText::new(&b.name).strong().size(15.0).color(theme::ACCENT));
+                if !b.name_en.is_empty() && b.name_en != b.name {
+                    ui.label(RichText::new(&b.name_en).size(11.0).color(theme::TEXT_DIM));
                 }
             });
-            ui.separator();
-            if ui.button("Smooth selected bone's keys").on_hover_text("Softens jittery captured motion").clicked() {
-                if let (Some(mi), Some(bi)) = (self.scene.selected, self.sel_bone) {
-                    self.checkpoint();
-                    let name = self.scene.models[mi].data.bones[bi].name.clone();
-                    if let Some(v) = self.scene.models[mi].motion.bones.get_mut(&name) {
-                        tools::smooth_track(v, 0.8);
+            if selected.len() > 1 {
+                ui.label(RichText::new(format!("+ {} more selected (keys and resets apply to all)", selected.len() - 1)).size(10.5).color(theme::KEY));
+            }
+            let (p, r) = m.bone_pose(bi);
+            let mut e = euler_deg(r);
+            let mut pp = p;
+            egui::Grid::new(("bone_vals", bi)).num_columns(4).spacing(vec2(6.0, 4.0)).show(ui, |ui| {
+                if b.rotatable {
+                    if theme::reset_label(ui, RichText::new("Rotation °").size(11.5).color(theme::TEXT_DIM)) {
+                        changed = Some((pp, Quat::IDENTITY));
                     }
-                    self.set_status(format!("Smoothed keys on {name}"));
+                    let mut ch = false;
+                    for (k, c) in [theme::AXIS_X, theme::AXIS_Y, theme::AXIS_Z].into_iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if theme::reset_label(ui, RichText::new(["X", "Y", "Z"][k]).color(c).strong()) {
+                                e[k] = 0.0;
+                                ch = true;
+                            }
+                            ch |= ui.add(egui::DragValue::new(&mut e[k]).speed(0.5).fixed_decimals(1)).changed();
+                        });
+                    }
+                    if ch {
+                        changed = Some((pp, quat_from_euler_deg(e)));
+                    }
+                    ui.end_row();
+                }
+                if b.movable {
+                    if theme::reset_label(ui, RichText::new("Position").size(11.5).color(theme::TEXT_DIM)) {
+                        changed = Some((Vec3::ZERO, r));
+                    }
+                    let mut ch = false;
+                    for (k, c) in [theme::AXIS_X, theme::AXIS_Y, theme::AXIS_Z].into_iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if theme::reset_label(ui, RichText::new(["X", "Y", "Z"][k]).color(c).strong()) {
+                                pp[k] = 0.0;
+                                ch = true;
+                            }
+                            ch |= ui.add(egui::DragValue::new(&mut pp[k]).speed(0.02).fixed_decimals(2)).changed();
+                        });
+                    }
+                    if ch {
+                        changed = Some((pp, r));
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.label(RichText::new("Double-click a label to reset it to 0.").size(10.0).color(theme::TEXT_DIM));
+            if b.ik.is_some() {
+                let mut on = m.skel.ik_enabled[bi];
+                if ui.checkbox(&mut on, "IK enabled").changed() {
+                    changed = None;
+                    self.scene.models[mi].skel.ik_enabled[bi] = on;
                 }
             }
         });
+        if let Some((p, r)) = changed {
+            self.edit_bone(mi, bi, p, r);
+        }
+        ui.horizontal_wrapped(|ui| {
+            let label = if selected.len() > 1 { format!("◆ Key {} bones  ⏎", selected.len()) } else { "◆ Register key  ⏎".to_string() };
+            if ui.add(egui::Button::new(RichText::new(label).color(Color32::BLACK)).fill(theme::KEY)).clicked() {
+                self.register_selected();
+            }
+            if ui.button("Reset rot").on_hover_text("Reset rotation of the selected bones (Alt+R)").clicked() {
+                self.reset_selected(false, true);
+            }
+            if ui.button("Reset pos").on_hover_text("Reset position of the selected bones (Alt+G)").clicked() {
+                self.reset_selected(true, false);
+            }
+            let name = self.scene.models[mi].data.bones[bi].name.clone();
+            let has_key = self.scene.models[mi].motion.bone_key_at(&name, frame);
+            if ui.add_enabled(has_key || selected.len() > 1, egui::Button::new("Delete key")).on_hover_text("Delete the selected bones' keys at this frame").clicked() {
+                self.delete_selected_bone_keys();
+            }
+        });
+        self.curve_editor(ui, mi, bi);
+    }
+
+    fn morph_tab(&mut self, ui: &mut egui::Ui, mi: usize) {
+        let frame = self.scene.frame.round() as u32;
+        ui.add(egui::TextEdit::singleline(&mut self.morph_search).hint_text("🔍 Find expression").desired_width(f32::INFINITY));
+        let q = self.morph_search.trim().to_lowercase();
+        let data = self.scene.models[mi].data.clone();
+        if data.morphs.is_empty() {
+            ui.label(RichText::new("This model has no expressions (morphs)").color(theme::TEXT_DIM));
+        }
+        ui.label(RichText::new("◇ = click to key · double-click a slider to reset it to 0").size(10.0).color(theme::TEXT_DIM));
+        for (panel, title) in [(1u8, "Eyebrows"), (2, "Eyes"), (3, "Mouth"), (4, "Other"), (0, "System")] {
+            let list: Vec<usize> = (0..data.morphs.len()).filter(|&i| data.morphs[i].panel == panel && (q.is_empty() || data.morphs[i].name.to_lowercase().contains(&q) || data.morphs[i].name_en.to_lowercase().contains(&q))).collect();
+            if list.is_empty() {
+                continue;
+            }
+            egui::CollapsingHeader::new(RichText::new(format!("{title} ({})", list.len())).size(12.0)).id_salt(("morphs", panel)).default_open(true).show(ui, |ui| {
+                for i in list {
+                    let name = data.morphs[i].name.clone();
+                    ui.horizontal(|ui| {
+                        let keyed = self.scene.models[mi].motion.morph_key_at(&name, frame);
+                        let diamond = egui::Button::new(RichText::new(if keyed { "◆" } else { "◇" }).color(if keyed { theme::KEY } else { theme::TEXT_DIM })).frame(false);
+                        if ui.add(diamond).on_hover_text("Register key").clicked() {
+                            self.checkpoint();
+                            self.scene.models[mi].register_morph_key(i, frame);
+                        }
+                        let mut w = self.scene.models[mi].morph_weights[i];
+                        let resp = ui.add(egui::Slider::new(&mut w, 0.0..=1.0).text(&name).fixed_decimals(2));
+                        let resp = theme::dbl(resp, &mut w, 0.0);
+                        if resp.changed() {
+                            self.sel_morph = Some(i);
+                            self.scene.models[mi].morph_edit.insert(i, w);
+                            if self.auto_key {
+                                self.scene.models[mi].morph_weights[i] = w;
+                                self.scene.models[mi].register_morph_key(i, frame);
+                            }
+                        }
+                    });
+                }
+            });
+        }
     }
 
     pub fn generate_motion(&mut self, g: tools::Generator, start: u32, len: u32, bpm: f32) -> usize {
@@ -622,81 +677,153 @@ impl App {
                 }
             });
             ui.horizontal(|ui| {
-                ui.label("Position");
+                if theme::reset_label(ui, RichText::new("Position")) {
+                    m.acc_pos = Vec3::ZERO;
+                }
                 ui.add(egui::DragValue::new(&mut m.acc_pos.x).speed(0.05));
                 ui.add(egui::DragValue::new(&mut m.acc_pos.y).speed(0.05));
                 ui.add(egui::DragValue::new(&mut m.acc_pos.z).speed(0.05));
             });
             ui.horizontal(|ui| {
-                ui.label("Rotation");
+                if theme::reset_label(ui, RichText::new("Rotation")) {
+                    m.acc_rot = Vec3::ZERO;
+                }
                 ui.add(egui::DragValue::new(&mut m.acc_rot.x).speed(0.5).suffix("°"));
                 ui.add(egui::DragValue::new(&mut m.acc_rot.y).speed(0.5).suffix("°"));
                 ui.add(egui::DragValue::new(&mut m.acc_rot.z).speed(0.5).suffix("°"));
             });
-            ui.add(egui::Slider::new(&mut m.acc_scale, 0.01..=50.0).logarithmic(true).text("Scale"));
-            ui.add(egui::Slider::new(&mut m.acc_opacity, 0.0..=1.0).text("Opacity"));
+            theme::dbl(ui.add(egui::Slider::new(&mut m.acc_scale, 0.01..=50.0).logarithmic(true).text("Scale")), &mut m.acc_scale, 10.0);
+            theme::dbl(ui.add(egui::Slider::new(&mut m.acc_opacity, 0.0..=1.0).text("Opacity")), &mut m.acc_opacity, 1.0);
         });
     }
 
+    pub fn key_camera(&mut self) {
+        let frame = self.scene.frame.round() as u32;
+        self.checkpoint();
+        let k = self.scene.camera.to_key(frame, [Curve::EASE_IN_OUT; 6]);
+        self.scene.camera_motion.set_camera_key(k);
+        self.scene.camera_edited = false;
+        self.set_status(format!("Camera key at frame {frame}"));
+    }
+
+    pub fn key_light(&mut self) {
+        let frame = self.scene.frame.round() as u32;
+        self.checkpoint();
+        let lk = LightKey { frame, color: self.scene.light.color, direction: self.scene.light.direction };
+        self.scene.camera_motion.set_light_key(lk);
+        self.scene.light_edited = false;
+        self.set_status(format!("Light key at frame {frame}"));
+    }
+
     pub fn camera_inspector(&mut self, ui: &mut egui::Ui) {
-        theme::section(ui, "Camera");
+        let frame = self.scene.frame.round() as u32;
+        let cam_keyed = self.scene.camera_motion.camera.iter().any(|k| k.frame == frame);
+        let light_keyed = self.scene.camera_motion.light.iter().any(|k| k.frame == frame);
+        let d = crate::scene::CameraState::default();
+        // ── Camera
+        ui.horizontal(|ui| {
+            theme::section(ui, "Camera");
+            if self.scene.camera_edited {
+                ui.label(RichText::new("● moved, not keyed").size(10.5).color(theme::KEY));
+            }
+        });
         let mut edited = false;
         theme::card(ui, |ui| {
+            ui.set_width(ui.available_width());
             let c = &mut self.scene.camera;
             let mut rot = c.rot * (180.0 / std::f32::consts::PI);
-            egui::Grid::new("cam").num_columns(4).show(ui, |ui| {
-                ui.label("Target");
-                edited |= ui.add(egui::DragValue::new(&mut c.target.x).speed(0.1)).changed();
-                edited |= ui.add(egui::DragValue::new(&mut c.target.y).speed(0.1)).changed();
-                edited |= ui.add(egui::DragValue::new(&mut c.target.z).speed(0.1)).changed();
+            egui::Grid::new("cam").num_columns(4).spacing(vec2(6.0, 4.0)).show(ui, |ui| {
+                if theme::reset_label(ui, RichText::new("Target").color(theme::TEXT_DIM)) {
+                    c.target = d.target;
+                    edited = true;
+                }
+                for k in 0..3 {
+                    edited |= ui.add(egui::DragValue::new(&mut c.target[k]).speed(0.1).max_decimals(2)).changed();
+                }
                 ui.end_row();
-                ui.label("Angle (°)");
-                edited |= ui.add(egui::DragValue::new(&mut rot.x).speed(0.5)).changed();
-                edited |= ui.add(egui::DragValue::new(&mut rot.y).speed(0.5)).changed();
-                edited |= ui.add(egui::DragValue::new(&mut rot.z).speed(0.5)).changed();
+                if theme::reset_label(ui, RichText::new("Angle °").color(theme::TEXT_DIM)) {
+                    rot = d.rot * (180.0 / std::f32::consts::PI);
+                    edited = true;
+                }
+                for k in 0..3 {
+                    edited |= ui.add(egui::DragValue::new(&mut rot[k]).speed(0.5).max_decimals(1)).changed();
+                }
                 ui.end_row();
             });
             c.rot = rot * (std::f32::consts::PI / 180.0);
-            edited |= ui.add(egui::Slider::new(&mut c.distance, -400.0..=-1.0).text("Distance")).changed();
-            edited |= ui.add(egui::Slider::new(&mut c.fov, 5.0..=120.0).text("Field of view")).changed();
+            edited |= theme::dbl(ui.add(egui::Slider::new(&mut c.distance, -400.0..=-1.0).text("Distance")), &mut c.distance, d.distance).changed();
+            edited |= theme::dbl(ui.add(egui::Slider::new(&mut c.fov, 5.0..=120.0).text("Field of view")), &mut c.fov, d.fov).changed();
             edited |= ui.checkbox(&mut c.ortho, "Orthographic").changed();
+            ui.label(RichText::new("Double-click a label or slider to reset it.").size(10.0).color(theme::TEXT_DIM));
         });
         if edited {
             self.scene.camera_edited = true;
         }
-        theme::section(ui, "Light");
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(RichText::new("◆ Key camera  ⏎").color(Color32::BLACK)).fill(theme::KEY)).on_hover_text("Register a camera key at this frame").clicked() {
+                self.key_camera();
+            }
+            if ui.add_enabled(cam_keyed, egui::Button::new("Delete camera key")).clicked() {
+                self.checkpoint();
+                self.scene.camera_motion.delete_key(&TrackId::Camera, frame);
+            }
+        });
+        // ── Light
+        let ld = crate::scene::LightState::default();
+        ui.horizontal(|ui| {
+            theme::section(ui, "Light");
+            if self.scene.light_edited {
+                ui.label(RichText::new("● changed, not keyed").size(10.5).color(theme::KEY));
+            }
+        });
         theme::card(ui, |ui| {
+            ui.set_width(ui.available_width());
             let l = &mut self.scene.light;
             let mut col = l.color.to_array();
             let mut ch = false;
             ui.horizontal(|ui| {
-                ui.label("Colour");
+                if theme::reset_label(ui, RichText::new("Colour").color(theme::TEXT_DIM)) {
+                    col = ld.color.to_array();
+                    ch = true;
+                }
                 ch |= ui.color_edit_button_rgb(&mut col).changed();
             });
             l.color = Vec3::from(col);
-            ui.label(RichText::new("Direction").size(11.0).color(theme::TEXT_DIM));
             ui.horizontal(|ui| {
-                ch |= ui.add(egui::DragValue::new(&mut l.direction.x).speed(0.01).range(-1.0..=1.0)).changed();
-                ch |= ui.add(egui::DragValue::new(&mut l.direction.y).speed(0.01).range(-1.0..=1.0)).changed();
-                ch |= ui.add(egui::DragValue::new(&mut l.direction.z).speed(0.01).range(-1.0..=1.0)).changed();
+                if theme::reset_label(ui, RichText::new("Direction").color(theme::TEXT_DIM)) {
+                    l.direction = ld.direction;
+                    ch = true;
+                }
+                for k in 0..3 {
+                    ch |= ui.add(egui::DragValue::new(&mut l.direction[k]).speed(0.01).range(-1.0..=1.0)).changed();
+                }
             });
             if ch {
                 self.scene.light_edited = true;
             }
         });
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(RichText::new("◆ Key light").color(Color32::BLACK)).fill(theme::KEY)).on_hover_text("Register a light key at this frame").clicked() {
+                self.key_light();
+            }
+            if ui.add_enabled(light_keyed, egui::Button::new("Delete light key")).clicked() {
+                self.checkpoint();
+                self.scene.camera_motion.delete_key(&TrackId::Light, frame);
+            }
+        });
+        // ── Stage
         theme::section(ui, "Stage");
         theme::card(ui, |ui| {
+            ui.set_width(ui.available_width());
             let st = &mut self.scene.stage;
             ui.horizontal(|ui| {
                 ui.label("Background");
                 ui.color_edit_button_rgb(&mut st.background);
             });
-            ui.add(egui::Slider::new(&mut st.shadow_distance, 10.0..=300.0).text("Shadow range"));
+            let sd = crate::scene::StageSettings::default().shadow_distance;
+            theme::dbl(ui.add(egui::Slider::new(&mut st.shadow_distance, 10.0..=300.0).text("Shadow range")), &mut st.shadow_distance, sd);
         });
-        if ui.add(egui::Button::new(RichText::new("◆ Key camera & light  ⏎").color(Color32::BLACK)).fill(theme::KEY)).clicked() {
-            self.register_selected();
-        }
-        ui.label(RichText::new("Camera keys are saved with the camera motion (File → Export camera & light motion).").size(11.0).color(theme::TEXT_DIM));
+        ui.label(RichText::new("Enter keys the camera (and the light too if you changed it). Keys are saved with the camera motion (File → Export camera & light motion).").size(10.5).color(theme::TEXT_DIM));
     }
 
     /// Bezier interpolation editor for the key at the playhead (or the curve for new keys).

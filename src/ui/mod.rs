@@ -1,4 +1,5 @@
 pub mod anim;
+pub mod animtools;
 pub mod color;
 pub mod fxstack;
 pub mod home;

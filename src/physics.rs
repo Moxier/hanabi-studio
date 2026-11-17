@@ -56,7 +56,8 @@ impl Default for PhysicsCfg {
             settle_steps: 40,
             damping_mul: 1.0,
             spring_mul: 1.0,
-            fixed_step: 0.0,
+            // Fixed 1/60 s steps: steadier and less likely to break than following the frame rate.
+            fixed_step: 1.0 / 60.0,
         }
     }
 }

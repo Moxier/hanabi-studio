@@ -170,7 +170,7 @@ impl App {
                     }
                     Row::Track { id, label } => {
                         let sel = match id {
-                            TrackId::Bone(n) => self.sel_bone.and_then(|b| self.scene.selected.map(|mi| &self.scene.models[mi].data.bones[b].name == n)).unwrap_or(false),
+                            TrackId::Bone(n) => self.scene.selected.and_then(|mi| self.scene.models[mi].data.bone_index(n).map(|b| self.is_bone_selected(mi, b))).unwrap_or(false),
                             TrackId::Camera | TrackId::Light => self.sel_camera,
                             TrackId::Morph(n) => self.sel_morph.and_then(|mo| self.scene.selected.map(|mi| self.scene.models[mi].data.morphs.get(mo).map(|m| &m.name == n).unwrap_or(false))).unwrap_or(false),
                         };
@@ -388,8 +388,9 @@ impl App {
             match t {
                 TrackId::Bone(n) => {
                     self.sel_camera = false;
-                    if let Some(mi) = self.scene.selected {
-                        self.sel_bone = self.scene.models[mi].data.bone_index(&n);
+                    if let Some(b) = self.scene.selected.and_then(|mi| self.scene.models[mi].data.bone_index(&n)) {
+                        let mods = ui.input(|i| i.modifiers);
+                        self.click_bone(b, mods);
                     }
                 }
                 TrackId::Morph(n) => {
