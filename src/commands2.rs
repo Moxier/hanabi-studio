@@ -529,12 +529,32 @@ impl App {
                 "enabled": self.scene.stage.physics,
                 "settings": self.scene.physics_cfg,
                 "substeps": self.scene.stage.physics_substeps,
-                "models": self.scene.models.iter().filter(|m| m.physics.is_some()).map(|m| json!({
+                "models": self.scene.models.iter().filter(|m| m.physics.is_some()).map(|m| {
+                    // Widest gap between a physics bone and its parent compared with the rest
+                    // pose: a quick way to tell a torn or exploded chain from normal swinging.
+                    let d = &m.data;
+                    let (mut gap, mut gap_bone) = (0.0f32, String::new());
+                    for (bi, bn) in d.bones.iter().enumerate() {
+                        if !m.physics_bones.get(bi).copied().unwrap_or(false) || bn.parent < 0 {
+                            continue;
+                        }
+                        let rest = (bn.position - d.bones[bn.parent as usize].position).length();
+                        let now = (m.skel.global_pos(bi) - m.skel.global_pos(bn.parent as usize)).length();
+                        if now - rest > gap {
+                            gap = now - rest;
+                            gap_bone = bn.name.clone();
+                        }
+                    }
+                    json!({
                     "name": m.name(), "physics": m.physics_enabled,
+                    "widest_gap": gap, "widest_gap_bone": gap_bone,
+                    "drift_score": m.physics.as_ref().map(|p| p.last_score).unwrap_or(0.0),
+                    "torn_links": m.physics.as_ref().map(|p| p.torn).unwrap_or(0),
+                    "flipped_links": m.physics.as_ref().map(|p| p.flipped).unwrap_or(0),
                     "changed_bodies": m.phys_tweaks.bodies.len(), "changed_joints": m.phys_tweaks.joints.len(),
                     "blowups": m.physics.as_ref().map(|p| p.blowups).unwrap_or(0),
                     "failed": m.physics.as_ref().map(|p| p.failed).unwrap_or(false),
-                })).collect::<Vec<_>>(),
+                })}).collect::<Vec<_>>(),
                 "undo_steps": self.phys_undo.len(),
                 "warning": self.phys_warning.as_ref().map(|w| w.1.clone()),
             })),

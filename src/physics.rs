@@ -111,6 +111,16 @@ pub struct Physics {
     pub blowups: u32,
     /// The part that drifted furthest in the last step.
     pub worst_body: usize,
+    /// For each body: its bone's rest offset from the parent bone, when both bone and parent
+    /// are moved by jointed bodies (a link inside a hair / skirt chain); used to spot torn or
+    /// flipped chains.
+    chain_rest: Vec<Option<(usize, usize, Vec3)>>,
+    /// Steps in a row with torn / flipped chain links (so brief swings don't count).
+    tear_run: u32,
+    flip_run: u32,
+    /// Chain links torn apart / turned inside out in the last step.
+    pub torn: usize,
+    pub flipped: usize,
     /// Set when the physics engine failed on this model; physics then stays off for it
     /// instead of taking the whole app down.
     pub failed: bool,
@@ -152,9 +162,17 @@ impl Physics {
         let mut bone_ids = Vec::new();
         let mut base_damping = Vec::new();
         let mut base_ang_damping = Vec::new();
+        // Each body's rest-pose transform (from the model file). Joint anchors must be worked out
+        // in the rest pose: the bodies themselves start at the current (possibly mid-dance) pose,
+        // and mixing the two put every joint in the wrong place when physics was rebuilt at a
+        // frame other than the rest pose.
+        let mut rest_worlds: Vec<Mat4> = Vec::with_capacity(m.rigid_bodies.len());
         for rb in &m.rigid_bodies {
             let rot = Quat::from_euler(EulerRot::YXZ, rb.rotation.y, rb.rotation.x, rb.rotation.z);
             let world = Mat4::from_rotation_translation(rot, rb.position);
+            // Same rounding as the engine's own pose, so building at the rest pose gives exactly the
+            // joint frames it always did.
+            rest_worlds.push(from_pose(&to_pose(&world)));
             let bone = if rb.bone >= 0 && (rb.bone as usize) < m.bones.len() { rb.bone } else { -1 };
             let bone_rest = if bone >= 0 { Mat4::from_translation(m.bones[bone as usize].position) } else { Mat4::IDENTITY };
             let offset = bone_rest.inverse() * world;
@@ -206,8 +224,8 @@ impl Physics {
             let (ha, hb) = (handles[a as usize].unwrap(), handles[b as usize].unwrap());
             let rot = Quat::from_euler(EulerRot::YXZ, j.rotation.y, j.rotation.x, j.rotation.z);
             let jw = Mat4::from_rotation_translation(rot, j.position);
-            let pa = from_pose(bodies[ha].position());
-            let pb = from_pose(bodies[hb].position());
+            let pa = rest_worlds[a as usize];
+            let pb = rest_worlds[b as usize];
             let f1 = to_pose(&(pa.inverse() * jw));
             let f2 = to_pose(&(pb.inverse() * jw));
             let lin_locked = (0..3).all(|k| (j.lin_max[k] - j.lin_min[k]).abs() < 1e-3);
@@ -321,9 +339,38 @@ impl Physics {
                 ((hi - lo).max_element() * 1.5).max(10.0)
             },
             last_score: 0.0,
-            jointed,
+            jointed: jointed.clone(),
             blowups: 0,
             worst_body: 0,
+            chain_rest: {
+                // bone -> is it moved by a jointed, simulated body?
+                let mut sim_bone = vec![false; m.bones.len()];
+                for (i, rb) in m.rigid_bodies.iter().enumerate() {
+                    if rb.mode != RigidMode::FollowBone && rb.bone >= 0 && (rb.bone as usize) < m.bones.len() && jointed[i] {
+                        sim_bone[rb.bone as usize] = true;
+                    }
+                }
+                m.rigid_bodies
+                    .iter()
+                    .enumerate()
+                    .map(|(i, rb)| {
+                        if rb.mode == RigidMode::FollowBone || !jointed[i] || rb.bone < 0 || rb.bone as usize >= m.bones.len() {
+                            return None;
+                        }
+                        let b = rb.bone as usize;
+                        let par = m.bones[b].parent;
+                        if par < 0 || !sim_bone[par as usize] {
+                            return None;
+                        }
+                        let off = m.bones[b].position - m.bones[par as usize].position;
+                        (off.length() > 0.05).then_some((b, par as usize, off))
+                    })
+                    .collect()
+            },
+            tear_run: 0,
+            flip_run: 0,
+            torn: 0,
+            flipped: 0,
             failed: false,
             chain,
             order: {
@@ -595,6 +642,42 @@ impl Physics {
             }
             skel.states[bi].global = g;
             skel.states[bi].physics_driven = true;
+        }
+        self.check_chains(skel);
+    }
+
+    /// Second blow-up check, on the chains themselves: links pulled far from their parent
+    /// (torn) or turned more than 150° from their rest direction (a skirt or hair chain flipped
+    /// inside out and stuck). If it lasts (10 steps torn / 30 steps flipped), everything is put
+    /// back on its bones and counted as a blow-up. Parts the physics drift check misses, such
+    /// as a whole skirt flipping, are caught here.
+    fn check_chains(&mut self, skel: &mut Skeleton) {
+        let (mut torn, mut flipped, mut links) = (0usize, 0usize, 0usize);
+        for c in self.chain_rest.iter().flatten() {
+            let (b, par, rest) = *c;
+            let local = skel.states[par].global.inverse().transform_point3(skel.states[b].global.w_axis.truncate());
+            if !local.is_finite() {
+                torn += 1;
+                continue;
+            }
+            links += 1;
+            let rl = rest.length();
+            if local.length() - rl > (rl * 2.0).max(2.0) {
+                torn += 1;
+            } else if local.normalize_or_zero().dot(rest / rl) < -0.866 {
+                flipped += 1;
+            }
+        }
+        self.torn = torn;
+        self.flipped = flipped;
+        let need = (links / 20).max(2);
+        self.tear_run = if torn >= need { self.tear_run + 1 } else { 0 };
+        self.flip_run = if flipped >= need { self.flip_run + 1 } else { 0 };
+        if self.tear_run >= 10 || self.flip_run >= 30 {
+            self.tear_run = 0;
+            self.flip_run = 0;
+            self.reset(skel);
+            self.blowups += 1;
         }
     }
 
