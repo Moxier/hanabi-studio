@@ -94,7 +94,7 @@ impl App {
         v
     }
 
-    fn credits_text(&self) -> String {
+    pub fn credits_text(&self) -> String {
         let mut out = String::from("Credits\n");
         for kind in ["Model", "Stage", "Accessory", "Motion", "Pose", "Song"] {
             let items: Vec<Entry> = self.credit_entries().into_iter().filter(|e| e.kind == kind).collect();

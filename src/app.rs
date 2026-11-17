@@ -199,6 +199,7 @@ pub struct App {
     pub phys_list_joints: bool,
     /// A model whose part changes still need a rebuild (done when the mouse is released).
     pub phys_pending: Option<u64>,
+    pub quit_at: Option<Instant>,
     pub phys_undo: Vec<crate::ui::phystune_ui::PhysState>,
     pub phys_redo: Vec<crate::ui::phystune_ui::PhysState>,
     /// An undo step is being collected (mouse still down), so a drag counts once.
@@ -277,6 +278,8 @@ pub struct Args {
     pub frame: Option<u32>,
     /// `--show credits|video-help|physics|mcp`: open a window at start (for pictures and docs).
     pub show: Option<String>,
+    /// `--quit-after S`: close by itself after S seconds (for automated tests, e.g. of MCP).
+    pub quit_after: Option<f32>,
 }
 
 impl App {
@@ -376,6 +379,7 @@ impl App {
             phys_search: String::new(),
             phys_list_joints: false,
             phys_pending: None,
+            quit_at: args.quit_after.map(|s| Instant::now() + std::time::Duration::from_secs_f32(s)),
             phys_undo: Vec::new(),
             phys_redo: Vec::new(),
             phys_edit_open: false,
@@ -1360,6 +1364,21 @@ impl App {
                     ui.ctx().copy_text(cfg);
                 }
                 ui.label(RichText::new("Or connect to the running app over HTTP at the address above.").color(theme::TEXT_DIM));
+                ui.separator();
+                ui.label(RichText::new("Claude Code").strong());
+                ui.label(RichText::new("Run one of these once in a terminal, then ask Claude things like “load my model and dance, then render a 1080p video”.").size(11.5).color(theme::TEXT_DIM));
+                let quoted = if exe.contains(' ') { format!("\"{exe}\"") } else { exe.clone() };
+                let stdio_cmd = format!("claude mcp add hanabi-studio -- {quoted} --mcp-stdio");
+                let http_cmd = format!("claude mcp add --transport http hanabi-studio http://127.0.0.1:{}/mcp", port.unwrap_or(7860));
+                for (label, cmd) in [("Claude starts the studio:", stdio_cmd), ("Use the studio that's already open:", http_cmd)] {
+                    ui.label(RichText::new(label).size(11.5));
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Label::new(RichText::new(&cmd).monospace().size(11.0).color(theme::KEY)).wrap());
+                        if ui.small_button("Copy").clicked() {
+                            ui.ctx().copy_text(cmd.clone());
+                        }
+                    });
+                }
                 ui.collapsing("Available tools", |ui| {
                     if let Some(arr) = crate::mcp::tools().as_array() {
                         for t in arr {
@@ -1534,6 +1553,12 @@ impl App {
 
     /// Runs even when the window is hidden: keep screenshot mode moving so it always finishes.
     pub fn logic_impl(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        if let Some(t) = self.quit_at {
+            ctx.request_repaint();
+            if Instant::now() >= t {
+                std::process::exit(0);
+            }
+        }
         let Some(s) = self.screenshot.as_ref() else { return };
         ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaintWhileHidden);
         ctx.request_repaint();

@@ -31,7 +31,7 @@ pub fn tools() -> Value {
     let tool = |name: &str, desc: &str, props: Value, req: &[&str]| {
         json!({"name": name, "description": desc, "inputSchema": {"type": "object", "properties": props, "required": req}})
     };
-    json!([
+    let mut list = json!([
         tool("get_scene", "Summary of the stage: models, selected model, frame, playback range, camera, active effect preset, colour grade.", json!({}), &[]),
         tool("load_file", "Open a file from disk: model (.pmx/.pmd), accessory (.x), motion (.vmd/.hmo, applied to the selected model or to the camera), pose (.vpd), audio (.wav) or project (.hproj).", json!({"path": s("Absolute path")}), &["path"]),
         tool("select_model", "Select a model by index or name.", json!({"index": n("Model index"), "name": s("Model name")}), &[]),
@@ -51,10 +51,10 @@ pub fn tools() -> Value {
         tool("add_effect_node", "Add an effect node (e.g. Bloom, Particles, Water Surface, Light Beams, Depth of Field) to the graph.", json!({"node": s("Node title")}), &["node"]),
         tool("set_effect_param", "Change a parameter of the first node with that title. Numbers, [r,g,b] colours, option index or booleans.", json!({"node": s("Node title"), "param": s("Parameter name"), "value": json!({"description": "number | [r,g,b] | boolean"})}), &["node", "param", "value"]),
         tool("get_effect_graph", "Describe the effect graph: nodes, parameters and links.", json!({}), &[]),
-        tool("set_color_grade", "Adjust colour grading. Fields: exposure, contrast, saturation, vibrance, temperature, tint, shadows, highlights, look (name), look_strength, enabled.", json!({"settings": json!({"type":"object"})}), &["settings"]),
+        tool("set_color_grade", "Adjust colour grading. Fields: exposure, contrast, saturation, vibrance, temperature, tint, shadows, highlights, lift/gamma/gain ([r,g,b] wheels, -0.5..0.5), look (name), look_strength, lut (path to a .cube file, '' removes it), lut_strength (0..1), split_compare (before/after), enabled, reset=true for neutral.", json!({"settings": json!({"type":"object"})}), &["settings"]),
         tool("render_image", "Render the current frame to a PNG file.", json!({"path": s("Absolute .png path"), "width": n("pixels"), "height": n("pixels")}), &["path"]),
-        tool("render_video", "Start rendering a frame range to a video (.mp4/.webm via ffmpeg) or a PNG sequence (folder path). Returns immediately; poll get_scene for progress.",
-            json!({"path": s("Output .mp4/.webm file or folder"), "start": n("first frame"), "end": n("last frame"), "width": n("px"), "height": n("px"), "fps": n("frames per second")}), &["path"]),
+        tool("render_video", "Start rendering a frame range (animation frames) to a video (.mp4/.webm/.mov via ffmpeg) or a PNG sequence (folder path). fps is the video frame rate; the animation keeps its own rate (a 30 fps dance rendered at 60 gets in-between frames, same speed). Other settings come from set_render_settings. Returns immediately; poll get_render_settings for progress.",
+            json!({"path": s("Output .mp4/.webm/.mov file or folder"), "start": n("first frame"), "end": n("last frame"), "width": n("px"), "height": n("px"), "fps": n("video frames per second"), "quality": n("12..32, lower = better"), "include_audio": b("include the song")}), &["path"]),
         tool("save_motion", "Save the selected model's motion (or camera motion with camera=true) as .vmd (MMD-compatible) or .hmo (this app's format).", json!({"path": s("Absolute path ending .vmd or .hmo"), "camera": b("Save camera/light motion instead")}), &["path"]),
         tool("save_project", "Save the whole project (.hproj).", json!({"path": s("Absolute path")}), &["path"]),
         tool("generate_motion", "Create a procedural motion on the selected model: idle (breathing/sway), wave (hand wave), nod, or bounce (rhythmic bounce at a BPM).", json!({"kind": s("idle | wave | nod | bounce"), "start": n("first frame"), "length": n("frames"), "bpm": n("for bounce")}), &["kind"]),
@@ -64,7 +64,11 @@ pub fn tools() -> Value {
         tool("set_material", "Edit one material (by name): preset (e.g. 'Chrome', 'Wet in rain', 'Short fur', 'Grass', 'Neon tube', 'Clear glass', 'Water + ripples'), special (none|glass|water|wet|fur|grass|glow), roughness, metallic, glow, glow_color [r,g,b], emit_light, normal_map / height_map / metal_map / rough_map (absolute file paths, '' to clear), auto=true returns it to automatic.",
             json!({"material": s("Material name"), "preset": s("Material preset name"), "special": s("special kind"), "roughness": n("0..1"), "metallic": n("0..1"), "glow": n("0..10"), "glow_color": json!({"type":"array","items":{"type":"number"}}), "emit_light": b("lights the surroundings"), "normal_map": s("path"), "height_map": s("path"), "metal_map": s("path"), "rough_map": s("path"), "auto": b("back to automatic")}), &["material"]),
         tool("undo", "Undo the last animation edit.", json!({}), &[]),
-    ])
+    ]);
+    if let Some(v) = list.as_array_mut() {
+        v.extend(crate::commands2::tools_more());
+    }
+    list
 }
 
 fn http_reply(stream: &mut TcpStream, status: &str, body: &str, session: bool) {
@@ -90,7 +94,7 @@ pub fn handle_message(msg: &Value, tx: &Sender<ToolCall>) -> Option<Value> {
             "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or(PROTOCOL),
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "hanabi-studio", "title": "Hanabi Studio", "version": env!("CARGO_PKG_VERSION")},
-            "instructions": "Controls the Hanabi Studio 3D dance animation app: load models/motions, pose bones, set keys, apply effects, grade colour and render."
+            "instructions": "Controls the Hanabi Studio 3D dance animation app. Start with get_status and get_scene / list_objects. You can load models, stages, props, motions, poses, songs and projects (load_file); organise objects in groups; pose bones (select_bones, pose_bone, transform_bones, reset_bones, key_bones, retime, pose_tools); key the camera and light; set song volume/offset; tune physics globally (set_physics) or per part (edit_rigid_body, edit_joint; undo with physics_undo); apply effects, materials, lights and colour grading (with .cube LUTs); and render images or videos (set_render_settings, render_video). Destructive actions need confirm=true."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools()})),

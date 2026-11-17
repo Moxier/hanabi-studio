@@ -285,7 +285,33 @@ impl App {
             }
             "set_color_grade" => {
                 let st = a.get("settings").ok_or("settings is required")?;
+                if st.get("reset").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let keep = (self.grade.lut.clone(), self.grade.lut_strength);
+                    self.grade = Default::default();
+                    self.grade.lut = keep.0;
+                    self.grade.lut_strength = keep.1;
+                }
                 let g = &mut self.grade;
+                for (k, slot) in [("lift", &mut g.lift), ("gamma", &mut g.gamma), ("gain", &mut g.gain)] {
+                    if let Some(v) = st.get(k).and_then(v3) {
+                        *slot = v.clamp(glam::Vec3::splat(-0.5), glam::Vec3::splat(0.5)).to_array();
+                    }
+                }
+                if let Some(p) = st.get("lut").and_then(|v| v.as_str()) {
+                    if p.is_empty() {
+                        g.lut = None;
+                    } else {
+                        let pb = PathBuf::from(p);
+                        crate::lut::load(&pb).map_err(|e| format!("can't use that LUT: {e}"))?;
+                        g.lut = Some(pb);
+                    }
+                }
+                if let Some(v) = st.get("lut_strength").and_then(|v| v.as_f64()) {
+                    g.lut_strength = (v as f32).clamp(0.0, 1.0);
+                }
+                if let Some(v) = st.get("split_compare").and_then(|v| v.as_bool()) {
+                    g.split_compare = v;
+                }
                 let f = |k: &str| st.get(k).and_then(|v| v.as_f64()).map(|v| v as f32);
                 if let Some(v) = f("exposure") { g.exposure = v; }
                 if let Some(v) = f("contrast") { g.contrast = v; }
@@ -332,6 +358,8 @@ impl App {
                 if let Some(w) = n("width") { rs.width = w as u32; }
                 if let Some(h) = n("height") { rs.height = h as u32; }
                 if let Some(f) = n("fps") { rs.fps = f; }
+                if let Some(q) = n("quality") { rs.quality = (q as u32).clamp(12, 32); }
+                if let Some(v) = a.get("include_audio").and_then(|v| v.as_bool()) { rs.include_audio = v; }
                 self.start_render_job();
                 if self.status_err {
                     return Err(self.status.clone());
@@ -477,7 +505,7 @@ impl App {
                 self.do_undo();
                 Ok(json!("undone"))
             }
-            _ => Err(format!("unknown tool {name}")),
+            _ => self.tool_more(name, a).unwrap_or_else(|| Err(format!("unknown tool {name}"))),
         }
     }
 }

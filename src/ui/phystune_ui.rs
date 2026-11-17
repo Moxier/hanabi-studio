@@ -57,7 +57,7 @@ impl PhysState {
 }
 
 impl App {
-    fn phys_snapshot(&self, label: &str) -> PhysState {
+    pub fn phys_snapshot(&self, label: &str) -> PhysState {
         PhysState {
             label: label.to_string(),
             cfg: self.scene.physics_cfg.clone(),
@@ -90,6 +90,16 @@ impl App {
         self.phys_pending = None;
         self.phys_warning = None;
         self.scene.force_reset_physics();
+    }
+
+    /// Record an undo step (for changes made outside the Physics window, e.g. by the AI).
+    pub fn phys_push_undo(&mut self, label: &str) {
+        let st = self.phys_snapshot(label);
+        self.phys_undo.push(st);
+        if self.phys_undo.len() > 100 {
+            self.phys_undo.remove(0);
+        }
+        self.phys_redo.clear();
     }
 
     pub fn phys_undo(&mut self) {
@@ -424,7 +434,7 @@ impl App {
 
     /// Store a changed part, rebuild the model's simulation, reset to the animation pose and
     /// save the preset.
-    fn commit_part(&mut self, mi: usize, body: Option<(usize, crate::model::RigidBody)>, joint: Option<(usize, crate::model::Joint)>) {
+    pub fn commit_part(&mut self, mi: usize, body: Option<(usize, crate::model::RigidBody)>, joint: Option<(usize, crate::model::Joint)>) {
         let m = &mut self.scene.models[mi];
         if let Some((i, rb)) = body {
             if m.phys_base.0.get(i) == Some(&rb) {
@@ -451,12 +461,18 @@ impl App {
 
     /// Finish a part change: rebuild, reset to the animation pose, save the preset.
     pub fn physics_apply_pending(&mut self, ctx: &egui::Context) {
-        let Some(id) = self.phys_pending else { return };
-        if ctx.input(|i| i.pointer.any_down()) {
+        if self.phys_pending.is_none() || ctx.input(|i| i.pointer.any_down()) {
             return;
         }
+        self.physics_finish();
+    }
+
+    /// Apply a pending part change now: rebuild, stability check, reset, save the preset.
+    /// Returns the warning if the change looks unstable.
+    pub fn physics_finish(&mut self) -> Option<String> {
+        let Some(id) = self.phys_pending else { return None };
         self.phys_pending = None;
-        let Some(mi) = self.scene.model_by_id(id) else { return };
+        let Some(mi) = self.scene.model_by_id(id) else { return None };
         let cfg = self.scene.physics_cfg.clone();
         let substeps = self.scene.stage.physics_substeps;
         let m = &mut self.scene.models[mi];
@@ -465,18 +481,16 @@ impl App {
         // Stability check: simulate the edited physics for a moment and compare with the
         // model's own values. A change that makes parts fly off gets a warning with Undo.
         let (score, broke) = crate::physics::stability_test(&m.data, &m.skel, &cfg, substeps);
-        let base = match m.phys_base_score {
-            Some(b) => b,
-            None => {
-                let mut orig = (*m.data).clone();
-                orig.rigid_bodies = m.phys_base.0.clone();
-                orig.joints = m.phys_base.1.clone();
-                let b = crate::physics::stability_test(&orig, &m.skel, &cfg, substeps).0;
-                m.phys_base_score = Some(b);
-                b
-            }
+        // Compare with the model's own values in the same pose: some poses strain the physics
+        // whatever the settings, and that isn't the edit's fault.
+        let (base, base_broke) = {
+            let mut orig = (*m.data).clone();
+            orig.rigid_bodies = m.phys_base.0.clone();
+            orig.joints = m.phys_base.1.clone();
+            crate::physics::stability_test(&orig, &m.skel, &cfg, substeps)
         };
-        let unstable = broke || (score > (base * 3.0).max(0.35));
+        m.phys_base_score = Some(base);
+        let unstable = if base_broke { false } else { broke || score > (base * 3.0).max(0.35) };
         let saved = match &m.file_key {
             Some(k) => crate::phystune::save(k, &m.phys_tweaks),
             None => Ok(()),
@@ -497,6 +511,7 @@ impl App {
             Ok(_) => self.set_error("This physics change looks unstable: see the Physics window"),
             Err(e) => self.set_error(format!("Couldn't save the physics preset: {e}")),
         }
+        self.phys_warning.as_ref().filter(|w| w.0 == id).map(|w| w.1.clone())
     }
 
     fn body_editor(&mut self, ui: &mut egui::Ui, mi: usize, i: usize) {

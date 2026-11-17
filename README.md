@@ -32,8 +32,21 @@ To let an AI client launch and drive it, add:
 { "mcpServers": { "hanabi-studio": { "command": "/path/to/hanabi-studio", "args": ["--mcp-stdio"] } } }
 ```
 
-Tools include loading files, listing bones/morphs, posing and keying, camera/light, effect presets
-and node parameters, colour grading, rendering images/videos, generating motion and saving.
+With Claude Code, run once: `claude mcp add hanabi-studio -- /path/to/hanabi-studio --mcp-stdio`
+(or `claude mcp add --transport http hanabi-studio http://127.0.0.1:7860/mcp` for an app that's already open).
+Help → AI connection shows these with the real path and a Copy button.
+
+The 59 tools cover what the app can do:
+
+* **Project & app:** `get_status`, `get_scene`, `set_workspace`, `new_project`, `load_file`, `save_project`, `get_credits`, `undo` / `redo`.
+* **Scene:** `list_objects`, `select_model`, `set_object` (visibility, rename, physics, outline, group, prop placement and attachment), `duplicate_object`, `delete_object`, `object_group`.
+* **Song & timeline:** `set_audio` (volume, mute, start frame, play WAV with frame), `set_timeline`, `set_frame`, `playback`.
+* **Animation:** `list_bones`, `list_morphs`, `pose_bone`, `set_morph`, `select_bones`, `key_bones`, `reset_bones`, `transform_bones` (multiply / offset pose or keys), `retime` (insert / delete frames, stretch, reverse), `pose_tools` (mirror, copy, paste, smooth, auto-key), `delete_keys`, `set_camera`, `set_light`, `key_camera_light`, `save_motion`, `generate_motion`.
+* **Physics:** `get_physics`, `set_physics` (gravity, time step, sub-steps, damping and spring multipliers, wind, stability), `list_rigid_bodies`, `list_joints`, `edit_rigid_body`, `edit_joint` (stability-checked, saved per model), `revert_physics`, `physics_undo` / `physics_redo`, `reset_physics`.
+* **Look:** effect presets and nodes, `set_material`, `set_material_type`, `add_light`, `set_color_grade` (wheels, looks, `.cube` LUTs).
+* **Render:** `get_render_settings`, `set_render_settings`, `render_image`, `render_video`, `cancel_render`.
+
+Actions that delete things need `confirm=true`. `--quit-after <seconds>` closes the app by itself, for automated tests.
 
 ## Build
 

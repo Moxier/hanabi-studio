@@ -14,6 +14,7 @@
 mod app;
 mod audio;
 mod commands;
+mod commands2;
 mod demo;
 mod effects;
 mod export;
@@ -39,7 +40,7 @@ mod ui;
 use std::path::PathBuf;
 
 fn main() -> eframe::Result<()> {
-    let mut args = app::Args { screenshot: None, mcp_stdio: false, mcp_port: 7860, workspace: None, files: Vec::new(), preset: None, no_demo: false, sample: false, home: false, frame: None, show: None };
+    let mut args = app::Args { screenshot: None, mcp_stdio: false, mcp_port: 7860, workspace: None, files: Vec::new(), preset: None, no_demo: false, sample: false, home: false, frame: None, show: None, quit_after: None };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -52,6 +53,7 @@ fn main() -> eframe::Result<()> {
             "--sample" => args.sample = true,
             "--home" => args.home = true,
             "--show" => args.show = it.next(),
+            "--quit-after" => args.quit_after = it.next().and_then(|s| s.parse().ok()),
             "--frame" => args.frame = it.next().and_then(|s| s.parse().ok()),
             "--resave" => {
                 // Re-save a project in the current (compact) format: --resave old.hproj new.hproj
@@ -102,7 +104,7 @@ fn main() -> eframe::Result<()> {
     }
     // Screenshot mode must draw even when no one is looking. Wayland compositors may stop sending
     // frames to a window that is hidden, so use X11 (XWayland) for it when available.
-    if args.screenshot.is_some() && std::env::var_os("DISPLAY").is_some() {
+    if (args.screenshot.is_some() || args.quit_after.is_some()) && std::env::var_os("DISPLAY").is_some() {
         std::env::remove_var("WAYLAND_DISPLAY");
     }
     let mut viewport = egui::ViewportBuilder::default()
@@ -110,7 +112,7 @@ fn main() -> eframe::Result<()> {
         .with_inner_size([1600.0, 940.0])
         .with_min_inner_size([1000.0, 640.0])
         .with_drag_and_drop(true);
-    if args.screenshot.is_some() {
+    if args.screenshot.is_some() || args.quit_after.is_some() {
         // Never take focus from what the person is doing; on Windows also stay behind other
         // windows (a covered window still draws there).
         viewport = viewport.with_active(false);

@@ -303,7 +303,7 @@ impl App {
     }
 
     /// Apply a frame remapping to the tracks the timing tools work on.
-    fn retime(&mut self, label: &str, f: impl Fn(u32) -> Option<u32>) {
+    pub fn retime(&mut self, label: &str, f: impl Fn(u32) -> Option<u32>) {
         let Some(mi) = self.anim_model() else { return };
         self.checkpoint();
         let only: Option<Vec<String>> = self.tool.only_selected.then(|| self.selected_bones().iter().map(|&b| self.scene.models[mi].data.bones[b].name.clone()).collect());
