@@ -35,6 +35,7 @@ impl Default for BoneState {
     }
 }
 
+#[derive(Clone)]
 pub struct Skeleton {
     pub states: Vec<BoneState>,
     pub order: Vec<usize>,

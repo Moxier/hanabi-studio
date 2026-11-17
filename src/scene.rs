@@ -66,6 +66,10 @@ pub struct ModelInstance {
     pub phys_tweaks: crate::phystune::PhysicsTweaks,
     /// Fingerprint of the model file, used to name its preset file.
     pub file_key: Option<String>,
+    /// Physics is held (bones at the animation pose) while a part value is being dragged.
+    pub physics_frozen: bool,
+    /// Stability score of the model's own physics (see physics::stability_test), for comparison.
+    pub phys_base_score: Option<f32>,
     /// Object group this model or prop belongs to (see `Scene::groups`).
     pub group: Option<u64>,
     /// Set when a group it is in is hidden.
@@ -119,6 +123,8 @@ impl ModelInstance {
             phys_base: Arc::new((data.rigid_bodies.clone(), data.joints.clone())),
             phys_tweaks: Default::default(),
             file_key: None,
+            physics_frozen: false,
+            phys_base_score: None,
             data: Arc::new(data),
             physics_paused: false,
             group: None,
@@ -325,7 +331,7 @@ impl ModelInstance {
         }
         self.apply_morphs();
         self.skel.update(&d, false);
-        let use_phys = physics_on && self.physics_enabled && self.shown();
+        let use_phys = physics_on && self.physics_enabled && self.shown() && !self.physics_frozen;
         let physics_step = if self.physics_paused && use_phys { None } else { physics_step };
         self.physics_paused = !self.shown();
         if let Some(ph) = self.physics.as_mut() {

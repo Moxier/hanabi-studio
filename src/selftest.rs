@@ -5,6 +5,7 @@
 use crate::formats::{self, FileKind};
 use crate::scene::{ModelInstance, Scene};
 use std::path::{Path, PathBuf};
+use glam::Vec3;
 use std::time::Instant;
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -141,7 +142,7 @@ pub fn run(root: &Path, deep: bool) -> i32 {
                         if let Ok(want) = std::env::var("HST_DUMP") {
                             for (ri, rb) in d.rigid_bodies.iter().enumerate() {
                                 let bname = d.bones.get(rb.bone.max(0) as usize).map(|b| b.name.as_str()).unwrap_or("-");
-                                if bname.contains(want.as_str()) || rb.name.contains(want.as_str()) {
+                                if bname.contains(want.as_str()) || rb.name.contains(want.as_str()) || want.parse::<usize>().ok() == Some(ri) {
                                     println!("      body #{ri} “{}” bone {bname} ({}) mode {:?} shape {:?} size {:?} mass {} damp {}/{} group {} mask {:016b}", rb.name, rb.bone, rb.mode, rb.shape, rb.size, rb.mass, rb.linear_damping, rb.angular_damping, rb.group, rb.mask);
                                     for j in d.joints.iter().filter(|j| j.a == ri as i32 || j.b == ri as i32) {
                                         let other = if j.a == ri as i32 { j.b } else { j.a };
@@ -368,14 +369,48 @@ pub fn run(root: &Path, deep: bool) -> i32 {
                 "ok  "
             };
             println!(
-                "{verdict}  {} + {}: {matched}/{} bones, {morph_matched}/{} morphs matched ({renamed} long names restored), {} frames at {fps:.0} fps (motion + IK + physics), worst physics stretch ×{worst_stretch:.2} at frame {worst_frame}, widest gap {worst_gap:.2} units ({worst_bone}), jitter avg {jitter:.4} max {jit_max:.2}, settles in {settle_at:.1} s (still moving {residual:.3}/s after 2 s){}",
+                "{verdict}  {} + {}: {matched}/{} bones, {morph_matched}/{} morphs matched ({renamed} long names restored), {} frames at {fps:.0} fps (motion + IK + physics), worst physics stretch ×{worst_stretch:.2} at frame {worst_frame}, widest gap {worst_gap:.2} units ({worst_bone}), jitter avg {jitter:.4} max {jit_max:.2}, settles in {settle_at:.1} s (still moving {residual:.3}/s after 2 s), guard resets {}{}",
                 short(root, &model.path),
                 short(root, mp),
                 motion.bones.len(),
                 motion.morphs.len(),
                 end + 1,
+                scene.models[i].physics.as_ref().map(|p| p.blowups).unwrap_or(0),
                 nan_frame.map(|f| format!(", broken numbers from frame {f}")).unwrap_or_default()
             );
+        }
+    }
+    // Stability check: each dancer's own physics should pass; a deliberately bad edit (all
+    // collisions on, oversized heavy pieces) should be caught.
+    if !dancers.is_empty() {
+        println!("\n## Physics stability check\n");
+        for model in dancers.iter().take(if deep { 100 } else { 8 }) {
+            let d = model.data.as_ref().unwrap();
+            let inst = ModelInstance::new(0, (**d).clone());
+            let cfg = crate::physics::PhysicsCfg::default();
+            let (own, own_broke) = crate::physics::stability_test(&inst.data, &inst.skel, &cfg, 2);
+            let mut bad = (**d).clone();
+            // A change that really breaks physics: every joint lets its pieces slide apart.
+            for j in bad.joints.iter_mut() {
+                j.lin_min = Vec3::splat(1.0);
+                j.lin_max = Vec3::splat(-1.0);
+            }
+            let (bad_score, bad_broke) = crate::physics::stability_test(&bad, &inst.skel, &cfg, 2);
+            let caught = bad_broke || bad_score > (own * 3.0).max(0.35);
+            let own_ok = !own_broke;
+            println!(
+                "{}  {}: own physics {:.0}% of the limit{} · bad edit {:.0}%{} → {}",
+                if caught && own_ok { "ok  " } else { "FAIL" },
+                short(root, &model.path),
+                own * 100.0,
+                if own_broke { " (blew up!)" } else { "" },
+                bad_score.min(9.99) * 100.0,
+                if bad_broke { " (blew up)" } else { "" },
+                if caught { "warned" } else { "NOT caught" }
+            );
+            if !(caught && own_ok) {
+                failures += 1;
+            }
         }
     }
     // Physics presets: a tweak is saved for the model and comes back when it loads again,

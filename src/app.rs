@@ -199,6 +199,14 @@ pub struct App {
     pub phys_list_joints: bool,
     /// A model whose part changes still need a rebuild (done when the mouse is released).
     pub phys_pending: Option<u64>,
+    pub phys_undo: Vec<crate::ui::phystune_ui::PhysState>,
+    pub phys_redo: Vec<crate::ui::phystune_ui::PhysState>,
+    /// An undo step is being collected (mouse still down), so a drag counts once.
+    pub phys_edit_open: bool,
+    /// A physics change that failed the stability check: (model id, message).
+    pub phys_warning: Option<(u64, String)>,
+    pub phys_blowups_seen: u32,
+    pub phys_win_rect: egui::Rect,
     pub confirm: Option<crate::ui::home::Confirm>,
     pub home: bool,
     pub recent: Vec<crate::ui::home::RecentProject>,
@@ -368,6 +376,12 @@ impl App {
             phys_search: String::new(),
             phys_list_joints: false,
             phys_pending: None,
+            phys_undo: Vec::new(),
+            phys_redo: Vec::new(),
+            phys_edit_open: false,
+            phys_warning: None,
+            phys_blowups_seen: 0,
+            phys_win_rect: egui::Rect::NOTHING,
             confirm: None,
             home: start_home,
             recent: crate::ui::home::load_recent(),
@@ -1014,6 +1028,15 @@ impl App {
                 Key::Home => self.scene.set_frame(self.scene.play_start as f32),
                 Key::End => self.scene.set_frame(self.scene.end_frame() as f32),
                 Key::Enter => self.register_selected(),
+                // Over the Physics window, undo / redo apply to physics edits.
+                Key::Z if cmd && self.phys_hovered(ctx) => {
+                    if m.shift {
+                        self.phys_redo()
+                    } else {
+                        self.phys_undo()
+                    }
+                }
+                Key::Y if cmd && self.phys_hovered(ctx) => self.phys_redo(),
                 Key::Z if cmd && m.shift => self.do_redo(),
                 Key::Z if cmd => self.do_undo(),
                 Key::Y if cmd => self.do_redo(),

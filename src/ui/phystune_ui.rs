@@ -40,14 +40,127 @@ fn mode_color(m: RigidMode) -> Color32 {
     }
 }
 
+/// Everything the Physics window can change, for undo / redo.
+#[derive(Clone, PartialEq)]
+pub struct PhysState {
+    pub label: String,
+    cfg: crate::physics::PhysicsCfg,
+    substeps: u32,
+    physics_on: bool,
+    models: Vec<(u64, bool, crate::phystune::PhysicsTweaks)>,
+}
+
+impl PhysState {
+    fn same(&self, o: &PhysState) -> bool {
+        self.cfg == o.cfg && self.substeps == o.substeps && self.physics_on == o.physics_on && self.models == o.models
+    }
+}
+
 impl App {
+    fn phys_snapshot(&self, label: &str) -> PhysState {
+        PhysState {
+            label: label.to_string(),
+            cfg: self.scene.physics_cfg.clone(),
+            substeps: self.scene.stage.physics_substeps,
+            physics_on: self.scene.stage.physics,
+            models: self.scene.models.iter().map(|m| (m.id, m.physics_enabled, m.phys_tweaks.clone())).collect(),
+        }
+    }
+
+    /// Put a saved physics state back: settings, per-model on/off and part tweaks (models whose
+    /// tweaks changed are rebuilt and their presets saved), then reset to the animation pose.
+    fn phys_restore(&mut self, st: &PhysState) {
+        self.scene.physics_cfg = st.cfg.clone();
+        self.scene.stage.physics_substeps = st.substeps;
+        self.scene.stage.physics = st.physics_on;
+        for (id, on, tw) in &st.models {
+            if let Some(i) = self.scene.model_by_id(*id) {
+                let m = &mut self.scene.models[i];
+                m.physics_enabled = *on;
+                if &m.phys_tweaks != tw {
+                    m.phys_tweaks = tw.clone();
+                    m.rebuild_physics();
+                    if let Some(k) = &m.file_key {
+                        let _ = crate::phystune::save(k, &m.phys_tweaks);
+                    }
+                }
+                m.physics_frozen = false;
+            }
+        }
+        self.phys_pending = None;
+        self.phys_warning = None;
+        self.scene.force_reset_physics();
+    }
+
+    pub fn phys_undo(&mut self) {
+        let Some(prev) = self.phys_undo.pop() else {
+            self.set_status("Nothing to undo in physics");
+            return;
+        };
+        let cur = self.phys_snapshot(&prev.label);
+        self.phys_redo.push(cur);
+        self.phys_restore(&prev);
+        self.set_status(format!("Undid: {}", prev.label));
+    }
+
+    pub fn phys_redo(&mut self) {
+        let Some(next) = self.phys_redo.pop() else { return };
+        let cur = self.phys_snapshot(&next.label);
+        self.phys_undo.push(cur);
+        self.phys_restore(&next);
+        self.set_status(format!("Redid: {}", next.label));
+    }
+
+    /// Whether the mouse is over the Physics window (Ctrl+Z then undoes physics edits).
+    pub fn phys_hovered(&self, ctx: &egui::Context) -> bool {
+        self.show_physics && ctx.pointer_hover_pos().map(|p| self.phys_win_rect.contains(p)).unwrap_or(false)
+    }
+
     pub fn physics_window(&mut self, ctx: &egui::Context) {
         self.physics_apply_pending(ctx);
         if !self.show_physics {
             return;
         }
+        let before = self.phys_snapshot("");
+        let mut action: Option<bool> = None; // Some(true) undo, Some(false) redo
         let mut open = true;
-        egui::Window::new("Physics").open(&mut open).default_width(440.0).default_height(620.0).resizable(true).show(ctx, |ui| {
+        let resp = egui::Window::new("Physics").open(&mut open).default_width(440.0).default_height(620.0).resizable(true).show(ctx, |ui| {
+            // Undo / redo for everything in this window
+            ui.horizontal(|ui| {
+                let ul = self.phys_undo.last().map(|s| format!("Undo: {} (Ctrl+Z)", s.label)).unwrap_or_else(|| "Nothing to undo".into());
+                if ui.add_enabled(!self.phys_undo.is_empty(), egui::Button::new("⟲ Undo")).on_hover_text(ul).clicked() {
+                    action = Some(true);
+                }
+                let rl = self.phys_redo.last().map(|s| format!("Redo: {} (Ctrl+Y)", s.label)).unwrap_or_else(|| "Nothing to redo".into());
+                if ui.add_enabled(!self.phys_redo.is_empty(), egui::Button::new("⟳ Redo")).on_hover_text(rl).clicked() {
+                    action = Some(false);
+                }
+                ui.label(RichText::new(format!("{} step(s)", self.phys_undo.len())).size(10.5).color(theme::TEXT_DIM));
+            });
+            // Warnings with a way back
+            let blown: u32 = self.scene.models.iter().filter_map(|m| m.physics.as_ref().map(|p| p.blowups)).sum();
+            if blown > self.phys_blowups_seen || self.phys_warning.is_some() {
+                egui::Frame::new().fill(Color32::from_rgb(70, 40, 30)).stroke(egui::Stroke::new(1.0, Color32::from_rgb(255, 150, 90))).corner_radius(egui::CornerRadius::same(6)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let text = match &self.phys_warning {
+                        Some((_, w)) => w.clone(),
+                        None => format!("Parts flew off and were put back on their bones ({} time(s)). If this started after a change, undo it.", blown - self.phys_blowups_seen),
+                    };
+                    ui.label(RichText::new(format!("⚠ {text}")).color(Color32::from_rgb(255, 210, 170)));
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(!self.phys_undo.is_empty(), egui::Button::new("⟲ Undo last change")).clicked() {
+                            action = Some(true);
+                        }
+                        if ui.button("⟲ Reset to animation pose").clicked() {
+                            self.scene.force_reset_physics();
+                        }
+                        if ui.button("Dismiss").clicked() {
+                            self.phys_warning = None;
+                            self.phys_blowups_seen = blown;
+                        }
+                    });
+                });
+            }
             ui.horizontal(|ui| {
                 ui.checkbox(&mut self.scene.stage.physics, "Simulate physics");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -77,7 +190,43 @@ impl App {
                 }
             });
         });
+        if let Some(r) = resp {
+            self.phys_win_rect = r.response.rect;
+        }
         self.show_physics = open;
+        let after = self.phys_snapshot("");
+        if !after.same(&before) {
+            if !self.phys_edit_open {
+                let label = if after.cfg != before.cfg || after.substeps != before.substeps || after.physics_on != before.physics_on {
+                    "global physics setting".to_string()
+                } else {
+                    let changed: Vec<String> = after
+                        .models
+                        .iter()
+                        .zip(&before.models)
+                        .filter(|(a, b)| a != b)
+                        .filter_map(|(a, _)| self.scene.model_by_id(a.0).map(|i| self.scene.models[i].data.name.clone()))
+                        .collect();
+                    format!("physics of {}", changed.join(", "))
+                };
+                let mut b = before;
+                b.label = label;
+                self.phys_undo.push(b);
+                if self.phys_undo.len() > 100 {
+                    self.phys_undo.remove(0);
+                }
+                self.phys_redo.clear();
+            }
+            self.phys_edit_open = true;
+        }
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.phys_edit_open = false;
+        }
+        match action {
+            Some(true) => self.phys_undo(),
+            Some(false) => self.phys_redo(),
+            None => {}
+        }
     }
 
     fn physics_global_ui(&mut self, ui: &mut egui::Ui) {
@@ -295,6 +444,8 @@ impl App {
         // While a value is being dragged only the numbers change; the simulation is rebuilt,
         // reset to the animation pose and saved once the mouse button is released.
         m.apply_tweaks_to_data();
+        // Hold this model's physics while values are dragged, so it can't fly apart mid-edit.
+        m.physics_frozen = true;
         self.phys_pending = Some(m.id);
     }
 
@@ -306,15 +457,44 @@ impl App {
         }
         self.phys_pending = None;
         let Some(mi) = self.scene.model_by_id(id) else { return };
+        let cfg = self.scene.physics_cfg.clone();
+        let substeps = self.scene.stage.physics_substeps;
         let m = &mut self.scene.models[mi];
         m.rebuild_physics();
+        m.physics_frozen = false;
+        // Stability check: simulate the edited physics for a moment and compare with the
+        // model's own values. A change that makes parts fly off gets a warning with Undo.
+        let (score, broke) = crate::physics::stability_test(&m.data, &m.skel, &cfg, substeps);
+        let base = match m.phys_base_score {
+            Some(b) => b,
+            None => {
+                let mut orig = (*m.data).clone();
+                orig.rigid_bodies = m.phys_base.0.clone();
+                orig.joints = m.phys_base.1.clone();
+                let b = crate::physics::stability_test(&orig, &m.skel, &cfg, substeps).0;
+                m.phys_base_score = Some(b);
+                b
+            }
+        };
+        let unstable = broke || (score > (base * 3.0).max(0.35));
         let saved = match &m.file_key {
             Some(k) => crate::phystune::save(k, &m.phys_tweaks),
             None => Ok(()),
         };
+        let id = m.id;
         self.scene.force_reset_physics();
+        if unstable {
+            self.phys_warning = Some((id, if broke {
+                "This change makes the physics blow up (parts fly off). Undo it, or adjust the value again.".to_string()
+            } else {
+                format!("This change makes the physics unstable (parts drift {:.0}% of the way to flying off, vs {:.0}% before). Undo it if it looks wrong.", score * 100.0, base * 100.0)
+            }));
+        } else if self.phys_warning.as_ref().map(|w| w.0 == id).unwrap_or(false) {
+            self.phys_warning = None;
+        }
         match saved {
-            Ok(_) => self.set_status("Physics updated, reset to the animation pose, and saved for this model"),
+            Ok(_) if !unstable => self.set_status("Physics updated, checked, reset to the animation pose, and saved for this model"),
+            Ok(_) => self.set_error("This physics change looks unstable: see the Physics window"),
             Err(e) => self.set_error(format!("Couldn't save the physics preset: {e}")),
         }
     }
@@ -344,7 +524,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.label("Own group");
             let mut g = rb.group as u32 + 1;
-            if ui.add(egui::DragValue::new(&mut g).range(1..=16)).changed() {
+            if ui.add(egui::DragValue::new(&mut g).range(1..=16).clamp_existing_to_range(false)).changed() {
                 rb.group = (g - 1) as u8;
                 changed = true;
             }
@@ -390,17 +570,24 @@ impl App {
                 });
             ui.end_row();
             ui.label("Size");
-            ui.horizontal(|ui| changed |= vec3_edit(ui, &mut rb.size, 0.01, false));
+            ui.horizontal(|ui| {
+                if vec3_edit(ui, &mut rb.size, 0.01, false) {
+                    // A zero or negative size breaks the engine (only checked when edited, so
+                    // just looking at a part never changes it).
+                    rb.size = rb.size.max(Vec3::splat(0.01));
+                    changed = true;
+                }
+            });
             ui.end_row();
-            for (label, v, max, tip) in [
-                ("Mass", &mut rb.mass, 100.0, "Heavier parts push lighter ones and swing more slowly"),
-                ("Move damping", &mut rb.linear_damping, 1.0, "0 = moves freely, 1 = stops almost at once"),
-                ("Turn damping", &mut rb.angular_damping, 1.0, "0 = swings freely, 1 = barely swings"),
-                ("Bounce", &mut rb.restitution, 1.0, "How much it bounces off other parts"),
-                ("Friction", &mut rb.friction, 2.0, "How much it grips when sliding against other parts"),
+            for (label, v, min, max, tip) in [
+                ("Mass", &mut rb.mass, 0.001, 100.0, "Heavier parts push lighter ones and swing more slowly"),
+                ("Move damping", &mut rb.linear_damping, 0.0, 0.999, "0 = moves freely, 1 = stops almost at once"),
+                ("Turn damping", &mut rb.angular_damping, 0.0, 0.999, "0 = swings freely, 1 = barely swings"),
+                ("Bounce", &mut rb.restitution, 0.0, 1.0, "How much it bounces off other parts"),
+                ("Friction", &mut rb.friction, 0.0, 2.0, "How much it grips when sliding against other parts"),
             ] {
                 ui.label(label).on_hover_text(tip);
-                if ui.add(egui::DragValue::new(v).speed(0.005).range(0.0..=max).max_decimals(3)).changed() {
+                if ui.add(egui::DragValue::new(v).speed(0.005).range(min..=max).clamp_existing_to_range(false).max_decimals(3)).changed() {
                     changed = true;
                 }
                 ui.end_row();

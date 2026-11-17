@@ -100,6 +100,17 @@ pub struct Physics {
     pub substeps: u32,
     /// Times the simulation was snapped back after a big move (shown in the Physics window).
     pub snaps: u32,
+    /// How far (in model units) a simulated part may drift from where its bone would hold it
+    /// before it counts as flown off; about 1.5x the size of the model's physics.
+    guard_dist: f32,
+    /// How far parts drift compared with the blow-up limit (95th percentile; 1.0 = flown off).
+    pub last_score: f32,
+    /// Parts held by at least one joint (loose parts don't count towards the score).
+    jointed: Vec<bool>,
+    /// Times parts flew off and were put back on their bones.
+    pub blowups: u32,
+    /// The part that drifted furthest in the last step.
+    pub worst_body: usize,
     /// Set when the physics engine failed on this model; physics then stays off for it
     /// instead of taking the whole app down.
     pub failed: bool,
@@ -270,6 +281,11 @@ impl Physics {
                 }
             }
         }
+        let mut jointed = vec![false; bone_ids.len()];
+        for (_, _, a, b, _, _) in &joint_info {
+            jointed[*a] = true;
+            jointed[*b] = true;
+        }
         let mut params = IntegrationParameters::default();
         params.dt = 1.0 / 60.0;
         Some(Self {
@@ -296,6 +312,18 @@ impl Physics {
             gravity: Vec3::new(0.0, -98.0, 0.0),
             substeps: 2,
             snaps: 0,
+            guard_dist: {
+                let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+                for rb in &m.rigid_bodies {
+                    lo = lo.min(rb.position);
+                    hi = hi.max(rb.position);
+                }
+                ((hi - lo).max_element() * 1.5).max(10.0)
+            },
+            last_score: 0.0,
+            jointed,
+            blowups: 0,
+            worst_body: 0,
             failed: false,
             chain,
             order: {
@@ -473,6 +501,53 @@ impl Physics {
             return;
         }
         self.hold_joints();
+        // Blow-up guard. Each simulated part is compared with where its bone would hold it.
+        // A part that wandered past the limit on its own (a loose earring, an odd ribbon) is
+        // quietly put back; when many parts fly off at once, or numbers break, the whole model
+        // is put back on its bones and the blow-up is counted (the Physics window offers Undo).
+        let mut ratios: Vec<f32> = Vec::new();
+        let mut far = 0usize;
+        let mut broken = false;
+        let mut worst_i = 0;
+        let mut worst = 0.0f32;
+        for i in 0..self.handles.len() {
+            let Some(h) = self.handles[i] else { continue };
+            if self.modes[i] == RigidMode::FollowBone || self.bones[i] < 0 {
+                continue;
+            }
+            let target = (skel.states[self.bones[i] as usize].global * self.offsets[i]).w_axis.truncate();
+            let d = (self.bodies[h].translation() - target).length();
+            if !d.is_finite() {
+                broken = true;
+                continue;
+            }
+            if d > worst {
+                worst = d;
+                worst_i = i;
+            }
+            if d > self.guard_dist {
+                far += 1;
+                // Put this one part back.
+                let bg = skel.states[self.bones[i] as usize].global;
+                let body = &mut self.bodies[h];
+                body.set_position(to_pose(&(bg * self.offsets[i])), true);
+                body.set_linvel(Vec3::ZERO, true);
+                body.set_angvel(Vec3::ZERO, true);
+            }
+            if self.jointed[i] {
+                ratios.push(d / self.guard_dist);
+            }
+        }
+        self.worst_body = worst_i;
+        // Score: the 95th percentile, so one or two odd parts don't decide it.
+        ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        self.last_score = ratios.get(((ratios.len() as f32 * 0.95) as usize).min(ratios.len().saturating_sub(1))).copied().unwrap_or(0.0);
+        let many = (ratios.len() / 10).max(3);
+        if broken || far >= many {
+            self.reset(skel);
+            self.blowups += 1;
+            return;
+        }
         // Keep things from flying off: cap how fast simulated parts may move.
         for i in 0..self.handles.len() {
             let Some(h) = self.handles[i] else { continue };
@@ -569,4 +644,31 @@ impl Physics {
             })
             .collect()
     }
+}
+
+/// Quick stability test of a model's physics: hold the current pose, simulate two seconds,
+/// and report the worst drift as a share of the blow-up limit (1.0 = it would fly off), plus
+/// whether it blew up or failed.
+pub fn stability_test(m: &ModelData, skel: &Skeleton, cfg: &PhysicsCfg, substeps: u32) -> (f32, bool) {
+    let Some(mut ph) = Physics::new(m, skel) else { return (0.0, false) };
+    ph.substeps = substeps;
+    let mut sk = skel.clone();
+    ph.reset(&sk);
+    let mut worst = 0.0f32;
+    for k in 0..120 {
+        let base = skel.clone();
+        sk.states.clone_from(&base.states);
+        ph.step(&mut sk, 1.0 / 60.0, cfg, k as f32 / 60.0);
+        if ph.failed {
+            return (f32::INFINITY, true);
+        }
+        worst = worst.max(ph.last_score);
+        if std::env::var_os("HST_STAB").is_some() && (k % 30 == 0 || ph.blowups > 0) {
+            eprintln!("step {k}: score {:.2}, furthest part #{}", ph.last_score, ph.worst_body);
+        }
+        if ph.blowups > 0 {
+            return (worst.max(1.0), true);
+        }
+    }
+    (worst, false)
 }
