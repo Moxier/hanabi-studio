@@ -692,7 +692,6 @@ impl App {
                 ui.color_edit_button_rgb(&mut st.background);
             });
             ui.add(egui::Slider::new(&mut st.shadow_distance, 10.0..=300.0).text("Shadow range"));
-            ui.add(egui::Slider::new(&mut st.physics_substeps, 1..=8).text("Physics quality"));
         });
         if ui.add(egui::Button::new(RichText::new("◆ Key camera & light  ⏎").color(Color32::BLACK)).fill(theme::KEY)).clicked() {
             self.register_selected();

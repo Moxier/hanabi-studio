@@ -6,6 +6,7 @@ pub mod lights;
 pub mod materials;
 pub mod nodes;
 pub mod outliner;
+pub mod phystune_ui;
 pub mod projgraph;
 pub mod render_ws;
 pub mod theme;

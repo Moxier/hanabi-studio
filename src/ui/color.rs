@@ -178,14 +178,66 @@ impl App {
             });
             ui.add(egui::Slider::new(&mut self.grade.look_strength, 0.0..=1.0).text("Strength"));
         });
+        theme::section(ui, "LUT (.cube)");
+        theme::card(ui, |ui| {
+            ui.set_width(ui.available_width());
+            match self.grade.lut.clone() {
+                Some(path) => {
+                    let name = crate::findfile::display_name(path.file_name().unwrap_or_default());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("▦").color(theme::ACCENT2));
+                        ui.add(egui::Label::new(RichText::new(&name).strong()).truncate()).on_hover_text(path.display().to_string());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new("×").frame(false)).on_hover_text("Remove the LUT").clicked() {
+                                self.grade.lut = None;
+                            }
+                        });
+                    });
+                    let err = self.renderer.as_ref().and_then(|r| r.lut_error.as_ref().filter(|e| e.0 == path).map(|e| e.1.clone()));
+                    match err {
+                        Some(e) => {
+                            ui.label(RichText::new(format!("Can't use this file: {e}")).size(11.0).color(Color32::from_rgb(255, 140, 120)));
+                        }
+                        None => {
+                            let title = self.renderer.as_ref().map(|r| r.lut_title.clone()).unwrap_or_default();
+                            if !title.is_empty() {
+                                ui.label(RichText::new(title).size(10.5).color(theme::TEXT_DIM));
+                            }
+                        }
+                    }
+                    let mut pct = self.grade.lut_strength * 100.0;
+                    if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%").text("Strength")).changed() {
+                        self.grade.lut_strength = pct / 100.0;
+                    }
+                    if ui.button("Choose another LUT…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("Colour LUT", &["cube", "CUBE"]).pick_file() {
+                            self.grade.lut = Some(p);
+                        }
+                    }
+                }
+                None => {
+                    ui.label(RichText::new("Apply a colour look-up table from a grading app or LUT pack. It's applied after the controls above, in the view and in renders.").size(11.0).color(theme::TEXT_DIM));
+                    if ui.button("Load LUT (.cube)…").clicked() {
+                        if let Some(p) = rfd::FileDialog::new().add_filter("Colour LUT", &["cube", "CUBE"]).pick_file() {
+                            self.grade.lut = Some(p);
+                            self.grade.lut_strength = 1.0;
+                        }
+                    }
+                }
+            }
+            ui.label(RichText::new("Tip: LUTs made for camera log footage look too strong on rendered scenes; lower the strength.").size(10.5).color(theme::TEXT_DIM));
+        });
         theme::section(ui, "Grade presets");
         ui.horizontal_wrapped(|ui| {
             for (name, g) in ColorGrade::presets() {
                 if ui.button(name).clicked() {
-                    let split = (self.grade.split_compare, self.grade.split_pos);
+                    // Presets change the grade but keep the compare split and the LUT.
+                    let keep = (self.grade.split_compare, self.grade.split_pos, self.grade.lut.clone(), self.grade.lut_strength);
                     self.grade = g;
-                    self.grade.split_compare = split.0;
-                    self.grade.split_pos = split.1;
+                    self.grade.split_compare = keep.0;
+                    self.grade.split_pos = keep.1;
+                    self.grade.lut = keep.2;
+                    self.grade.lut_strength = keep.3;
                 }
             }
         });

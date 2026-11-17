@@ -33,6 +33,15 @@ pub struct ColorGrade {
     pub look_strength: f32,
     pub split_compare: bool,
     pub split_pos: f32,
+    /// A colour look-up table (.cube) applied after the grade.
+    #[serde(default)]
+    pub lut: Option<std::path::PathBuf>,
+    #[serde(default = "one")]
+    pub lut_strength: f32,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 impl Default for ColorGrade {
@@ -54,6 +63,8 @@ impl Default for ColorGrade {
             look_strength: 1.0,
             split_compare: false,
             split_pos: 0.5,
+            lut: None,
+            lut_strength: 1.0,
         }
     }
 }

@@ -124,6 +124,11 @@ pub struct Renderer {
     shadow: Target,
     models: HashMap<u64, GpuModel>,
     tex_cache: HashMap<PathBuf, Option<glow::Texture>>,
+    /// The loaded colour LUT: (file, 3D texture, size, domain min, domain max).
+    lut_tex: Option<(PathBuf, glow::Texture, usize, Vec3, Vec3)>,
+    /// A LUT that couldn't be read, and why (shown on the Color page).
+    pub lut_error: Option<(PathBuf, String)>,
+    pub lut_title: String,
     ms: Option<MsTarget>,
     scene_t: Option<Target>,
     reflect: Option<Target>,
@@ -317,6 +322,9 @@ impl Renderer {
                 shadow,
                 models: HashMap::new(),
                 tex_cache: HashMap::new(),
+                lut_tex: None,
+                lut_error: None,
+                lut_title: String::new(),
                 ms: None,
                 scene_t: None,
                 reflect: None,
@@ -1544,6 +1552,11 @@ impl Renderer {
         let final_hdr = results.last().copied().unwrap_or(scene_color);
 
         // ---- colour grade into the 8-bit output
+        self.ensure_lut(gl, fp.grade.lut.as_deref());
+        let lut = match (&fp.grade.lut, &self.lut_tex) {
+            (Some(want), Some((have, tex, n, mn, mx))) if want == have && fp.grade.lut_strength > 0.0 => Some((*tex, *n, *mn, *mx)),
+            _ => None,
+        };
         let out = self.output.as_ref().unwrap();
         out.bind(gl);
         let g = fp.grade;
@@ -1567,7 +1580,28 @@ impl Renderer {
         p.i(gl, "u_split", g.split_compare as i32);
         p.f(gl, "u_split_pos", g.split_pos);
         p.v2(gl, "u_texel", texel);
+        // The LUT always sits on texture unit 1 (a 3D sampler may not share unit 0 with u_tex).
+        p.i(gl, "u_lut", 1);
+        match lut {
+            Some((tex, n, mn, mx)) => {
+                unsafe {
+                    gl.active_texture(glow::TEXTURE1);
+                    gl.bind_texture(glow::TEXTURE_3D, Some(tex));
+                }
+                p.i(gl, "u_lut_on", 1);
+                p.f(gl, "u_lut_k", fp.grade.lut_strength.clamp(0.0, 1.0));
+                p.f(gl, "u_lut_n", n as f32);
+                p.v3(gl, "u_lut_min", mn);
+                p.v3(gl, "u_lut_max", mx);
+            }
+            None => p.i(gl, "u_lut_on", 0),
+        }
         self.draw_fullscreen(gl);
+        unsafe {
+            gl.active_texture(glow::TEXTURE1);
+            gl.bind_texture(glow::TEXTURE_3D, None);
+            gl.active_texture(glow::TEXTURE0);
+        }
 
         // restore state for egui
         unsafe {
@@ -1584,6 +1618,41 @@ impl Renderer {
         self.particles.retain(|k, _| live.contains(k));
         self.stats.gpu_ms = t0.elapsed().as_secs_f32() * 1000.0;
         self.output.as_ref().unwrap().color
+    }
+
+    /// Load the LUT the grade asks for (once per file; a broken file is remembered, not retried
+    /// every frame).
+    fn ensure_lut(&mut self, gl: &glow::Context, path: Option<&Path>) {
+        let Some(path) = path else { return };
+        if self.lut_tex.as_ref().map(|l| l.0 == path).unwrap_or(false) || self.lut_error.as_ref().map(|e| e.0 == path).unwrap_or(false) {
+            return;
+        }
+        match crate::lut::load(path) {
+            Ok(l) => unsafe {
+                if let Some((_, old, ..)) = self.lut_tex.take() {
+                    gl.delete_texture(old);
+                }
+                let Ok(t) = gl.create_texture() else { return };
+                gl.bind_texture(glow::TEXTURE_3D, Some(t));
+                for (k, v) in [
+                    (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                    (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+                    (glow::TEXTURE_WRAP_R, glow::CLAMP_TO_EDGE),
+                ] {
+                    gl.tex_parameter_i32(glow::TEXTURE_3D, k, v as i32);
+                }
+                gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                let n = l.size as i32;
+                gl.tex_image_3d(glow::TEXTURE_3D, 0, glow::RGB16F as i32, n, n, n, 0, glow::RGB, glow::FLOAT, glow::PixelUnpackData::Slice(Some(as_bytes(&l.data))));
+                gl.bind_texture(glow::TEXTURE_3D, None);
+                self.lut_title = l.title.clone();
+                self.lut_error = None;
+                self.lut_tex = Some((path.to_path_buf(), t, l.size, Vec3::from(l.domain_min), Vec3::from(l.domain_max)));
+            },
+            Err(e) => self.lut_error = Some((path.to_path_buf(), e)),
+        }
     }
 
     /// Read back the last output (top row first), RGBA8.

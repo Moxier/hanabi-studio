@@ -60,6 +60,12 @@ pub struct ModelInstance {
     pub physics_bones: Vec<bool>,
     /// Physics is paused while the model is hidden and settles again when it reappears.
     physics_paused: bool,
+    /// The model's own rigid bodies and joints (from its file), before any tweaks.
+    pub phys_base: Arc<(Vec<RigidBody>, Vec<Joint>)>,
+    /// Tweaks made in the physics panel, kept in a preset file per model (see phystune.rs).
+    pub phys_tweaks: crate::phystune::PhysicsTweaks,
+    /// Fingerprint of the model file, used to name its preset file.
+    pub file_key: Option<String>,
     /// Object group this model or prop belongs to (see `Scene::groups`).
     pub group: Option<u64>,
     /// Set when a group it is in is hidden.
@@ -109,15 +115,10 @@ impl ModelInstance {
             acc_opacity: 1.0,
             world: Mat4::IDENTITY,
             last_weights: vec![-1.0; nm],
-            physics_bones: {
-                let mut v = vec![false; data.bones.len()];
-                for rb in &data.rigid_bodies {
-                    if rb.mode != crate::model::RigidMode::FollowBone && rb.bone >= 0 && (rb.bone as usize) < v.len() {
-                        v[rb.bone as usize] = true;
-                    }
-                }
-                v
-            },
+            physics_bones: physics_bone_flags(&data),
+            phys_base: Arc::new((data.rigid_bodies.clone(), data.joints.clone())),
+            phys_tweaks: Default::default(),
+            file_key: None,
             data: Arc::new(data),
             physics_paused: false,
             group: None,
@@ -127,6 +128,42 @@ impl ModelInstance {
 
     pub fn name(&self) -> &str {
         &self.data.name
+    }
+
+    /// Put the model's own bodies and joints plus the current tweaks into the model and rebuild
+    /// its simulation (needed after changing shapes, sizes, masses, modes or collisions).
+    /// The pose is re-settled on the next evaluation.
+    pub fn rebuild_physics(&mut self) {
+        self.apply_tweaks_to_data();
+        let substeps = self.physics.as_ref().map(|p| p.substeps).unwrap_or(2);
+        self.physics = Physics::new(&self.data, &self.skel);
+        if let Some(p) = self.physics.as_mut() {
+            p.substeps = substeps;
+            p.reset(&self.skel);
+        }
+        self.physics_bones = physics_bone_flags(&self.data);
+        self.physics_paused = true;
+    }
+
+    /// Put the tweaked values into the model data (cheap; the simulation isn't rebuilt).
+    pub fn apply_tweaks_to_data(&mut self) {
+        let (b, j) = self.phys_tweaks.apply(&self.phys_base.0, &self.phys_base.1);
+        let data = Arc::make_mut(&mut self.data);
+        data.rigid_bodies = b;
+        data.joints = j;
+    }
+
+    /// Load this model's saved physics preset, if it has one.
+    pub fn load_physics_preset(&mut self) -> bool {
+        let Some(key) = &self.file_key else { return false };
+        match crate::phystune::load(key) {
+            Some(t) if !t.is_empty() => {
+                self.phys_tweaks = t;
+                self.rebuild_physics();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Drawn in the view: visible itself and not inside a hidden group.
@@ -403,6 +440,8 @@ pub struct StageSettings {
     pub shadow_distance: f32,
     pub show_bones: bool,
     pub show_rigid: bool,
+    /// Draw physics joints in the view.
+    pub show_joints: bool,
     /// Show bones that physics moves (hair, skirt…). Off by default to keep posing tidy.
     pub show_physics_bones: bool,
     pub physics: bool,
@@ -422,6 +461,7 @@ impl Default for StageSettings {
             shadow_distance: 60.0,
             show_bones: true,
             show_rigid: false,
+            show_joints: false,
             show_physics_bones: false,
             physics: true,
             physics_substeps: 2,
@@ -777,7 +817,13 @@ impl Scene {
                     m.morphs.len(),
                     m.rigid_bodies.len()
                 );
-                self.add_model(m);
+                let i = self.add_model(m);
+                // Apply this model's saved physics tweaks (the model file is never changed).
+                self.models[i].file_key = Some(crate::phystune::fingerprint(&data));
+                if self.models[i].load_physics_preset() {
+                    self.last_eval_frame = -1.0;
+                    return Ok(format!("{msg} · your physics tweaks for it were applied"));
+                }
                 Ok(msg)
             }
             FileKind::Accessory => {
@@ -854,4 +900,15 @@ impl Scene {
             _ => Err(format!("{fname}: this file type can't be opened here")),
         }
     }
+}
+
+/// Bones moved by physics (not just following their bone).
+fn physics_bone_flags(data: &ModelData) -> Vec<bool> {
+    let mut v = vec![false; data.bones.len()];
+    for rb in &data.rigid_bodies {
+        if rb.mode != crate::model::RigidMode::FollowBone && rb.bone >= 0 && (rb.bone as usize) < v.len() {
+            v[rb.bone as usize] = true;
+        }
+    }
+    v
 }

@@ -185,6 +185,13 @@ pub struct App {
     pub autosave_busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub show_credits: bool,
     pub show_physics: bool,
+    /// Part selected in the physics panel: (model id, is joint, index).
+    pub phys_sel: Option<(u64, bool, usize)>,
+    pub phys_tab: u8,
+    pub phys_search: String,
+    pub phys_list_joints: bool,
+    /// A model whose part changes still need a rebuild (done when the mouse is released).
+    pub phys_pending: Option<u64>,
     pub confirm: Option<crate::ui::home::Confirm>,
     pub home: bool,
     pub recent: Vec<crate::ui::home::RecentProject>,
@@ -344,6 +351,11 @@ impl App {
             autosave_busy: Default::default(),
             show_credits: false,
             show_physics: false,
+            phys_sel: None,
+            phys_tab: 0,
+            phys_search: String::new(),
+            phys_list_joints: false,
+            phys_pending: None,
             confirm: None,
             home: start_home,
             recent: crate::ui::home::load_recent(),
@@ -402,6 +414,18 @@ impl App {
             Some("credits") => app.show_credits = true,
             Some("video-help") => app.show_video_help = true,
             Some("physics") => app.show_physics = true,
+            Some("physics-parts") => {
+                // Parts tab with the selected model's first simulated body picked and the
+                // wireframes on (for pictures of the tuning panel).
+                app.show_physics = true;
+                app.phys_tab = 1;
+                app.scene.stage.show_rigid = true;
+                app.scene.stage.show_joints = true;
+                if let Some(m) = app.scene.selected.and_then(|i| app.scene.models.get(i)) {
+                    let i = m.data.rigid_bodies.iter().position(|b| b.mode != crate::model::RigidMode::FollowBone).unwrap_or(0);
+                    app.phys_sel = Some((m.id, false, i));
+                }
+            }
             Some("mcp") => app.show_mcp = true,
             _ => {}
         }
@@ -841,6 +865,7 @@ impl App {
     }
 
     pub fn start_render_job(&mut self) {
+        self.render_settings.anim_fps = self.scene.fps;
         let s = self.render_settings.clone();
         let audio = self.scene.audio.as_ref().filter(|a| a.gain() > 0.0).map(|a| (a.path.clone(), -(a.offset_frames as f32) / self.scene.fps, a.gain()));
         match RenderJob::start(s, audio) {
@@ -868,10 +893,12 @@ impl App {
             if job.done {
                 break;
             }
+            // Video frame k sits at its own moment of the animation; the animation's frame rate
+            // stays as it is (changing it would speed the dance up or slow it down).
             let f = job.next;
+            let tl = job.timeline_frame(f);
             let (w, h, msaa, fps) = (job.settings.width, job.settings.height, job.settings.msaa, job.settings.fps);
-            self.scene.fps = fps;
-            self.scene.frame = f as f32;
+            self.scene.frame = tl;
             self.scene.evaluate();
             let ft = Instant::now();
             let px = self.render_offline(&gl, w, h, 1.0 / fps, msaa);
@@ -887,11 +914,20 @@ impl App {
                 self.set_error(e);
                 break;
             }
-            if job.next > job.settings.end {
+            if job.next >= job.total() {
                 let res = job.finish();
+                let open = job.settings.open_when_done.then(|| {
+                    let p = job.settings.path.clone();
+                    if p.is_dir() { p } else { p.parent().map(|d| d.to_path_buf()).unwrap_or(p) }
+                });
                 self.job = None;
                 match res {
-                    Ok(m) => self.set_status(m),
+                    Ok(m) => {
+                        if let Some(d) = open {
+                            crate::ui::links::open_external(d.as_os_str());
+                        }
+                        self.set_status(m)
+                    }
                     Err(e) => self.set_error(e),
                 }
                 break;
@@ -1202,73 +1238,6 @@ impl App {
                     });
                 });
             });
-    }
-
-    fn physics_window(&mut self, ctx: &egui::Context) {
-        if !self.show_physics {
-            return;
-        }
-        use crate::physics::BigMove;
-        let mut open = true;
-        egui::Window::new("Physics").open(&mut open).default_width(330.0).resizable(false).show(ctx, |ui| {
-            let st = &mut self.scene.stage;
-            ui.checkbox(&mut st.physics, "Simulate physics (hair, skirts, accessories)");
-            ui.add(egui::Slider::new(&mut st.physics_substeps, 1..=8).text("Quality (steps per frame)"));
-            let c = &mut self.scene.physics_cfg;
-            theme::section(ui, "Gravity");
-            ui.add(egui::Slider::new(&mut c.gravity, 0.0..=300.0).text("Strength"));
-            ui.horizontal(|ui| {
-                ui.label("Direction");
-                for v in c.gravity_dir.iter_mut() {
-                    ui.add(egui::DragValue::new(v).speed(0.02).range(-1.0..=1.0));
-                }
-                if ui.small_button("Down").clicked() {
-                    c.gravity_dir = [0.0, -1.0, 0.0];
-                }
-            });
-            theme::section(ui, "Wind");
-            ui.add(egui::Slider::new(&mut c.wind_strength, 0.0..=200.0).text("Strength"));
-            ui.add(egui::Slider::new(&mut c.wind_dir, -180.0..=180.0).text("Direction (°)"));
-            ui.add(egui::Slider::new(&mut c.wind_gusts, 0.0..=1.0).text("Gusts (noise)"));
-            ui.add(egui::Slider::new(&mut c.air_drag, 0.0..=1.0).text("Air drag"));
-            theme::section(ui, "Stability");
-            ui.add(egui::Slider::new(&mut c.max_speed, 20.0..=1000.0).logarithmic(true).text("Speed limit"));
-            ui.horizontal(|ui| {
-                ui.label("After a sudden big move");
-                egui::ComboBox::from_id_salt("bigmove")
-                    .selected_text(match c.big_move {
-                        BigMove::Snap => "Snap back",
-                        BigMove::Soften => "Carry along",
-                        BigMove::Off => "Do nothing",
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut c.big_move, BigMove::Snap, "Snap back").on_hover_text("Put hair and cloth straight back on their bones");
-                        ui.selectable_value(&mut c.big_move, BigMove::Soften, "Carry along").on_hover_text("Move them with the character, keeping a little swing");
-                        ui.selectable_value(&mut c.big_move, BigMove::Off, "Do nothing");
-                    });
-            });
-            ui.add(egui::Slider::new(&mut c.big_move_dist, 0.5..=30.0).text("Big move = more than (units/frame)"));
-            ui.add(egui::Slider::new(&mut c.settle_steps, 0..=200).text("Settle steps after a jump"));
-            ui.horizontal(|ui| {
-                if ui.button("⟲ Reset physics").clicked() {
-                    self.scene.force_reset_physics();
-                }
-                if ui.button("Defaults").clicked() {
-                    self.scene.physics_cfg = Default::default();
-                }
-            });
-            let snaps: u32 = self.scene.models.iter().filter_map(|m| m.physics.as_ref().map(|p| p.snaps)).sum();
-            ui.label(RichText::new(format!("Sudden moves caught so far: {snaps}")).size(10.5).color(theme::TEXT_DIM));
-            ui.separator();
-            theme::section(ui, "Per model");
-            for m in &mut self.scene.models {
-                if m.physics.is_some() {
-                    ui.checkbox(&mut m.physics_enabled, m.data.name.clone());
-                }
-            }
-            ui.checkbox(&mut self.scene.stage.show_physics_bones, "Show physics bones while posing");
-        });
-        self.show_physics = open;
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {

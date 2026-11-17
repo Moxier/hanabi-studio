@@ -38,9 +38,16 @@ impl OutFormat {
 pub struct RenderSettings {
     pub width: u32,
     pub height: u32,
+    /// Video frame rate. Separate from the animation's own rate (`anim_fps`): a 30 fps
+    /// animation rendered at 60 fps gets in-between frames, with the same speed and length.
     pub fps: f32,
+    /// First and last frame to render, in animation (timeline) frames.
     pub start: u32,
     pub end: u32,
+    /// The animation's frame rate, filled in from the project when the render starts.
+    pub anim_fps: f32,
+    /// Open the folder with the result when the render finishes.
+    pub open_when_done: bool,
     pub format: OutFormat,
     pub quality: u32,
     pub include_audio: bool,
@@ -48,14 +55,26 @@ pub struct RenderSettings {
     pub path: PathBuf,
 }
 
+impl RenderSettings {
+    /// Length of the range in seconds (end frame included).
+    pub fn seconds(&self) -> f32 {
+        (self.end.saturating_sub(self.start) + 1) as f32 / self.anim_fps.max(1.0)
+    }
+    pub fn video_frames(&self) -> u32 {
+        (self.end.saturating_sub(self.start) as f32 / self.anim_fps.max(1.0) * self.fps.max(1.0)).round() as u32 + 1
+    }
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
             width: 1920,
             height: 1080,
-            fps: 30.0,
+            fps: 60.0,
             start: 0,
             end: 240,
+            anim_fps: 30.0,
+            open_when_done: true,
             format: OutFormat::Mp4,
             quality: 18,
             include_audio: true,
@@ -188,7 +207,7 @@ impl RenderJob {
                 }
                 cmd.args(["-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", &format!("{}x{}", s.width, s.height), "-r", &format!("{}", s.fps), "-i", "-"]);
                 if let (true, Some((a, offset, gain))) = (s.include_audio, &audio) {
-                    let start_sec = s.start as f32 / s.fps + offset;
+                    let start_sec = s.start as f32 / s.anim_fps.max(1.0) + offset;
                     cmd.args(["-ss", &format!("{:.3}", start_sec.max(0.0)), "-i"]).arg(a);
                     cmd.args(["-map", "0:v", "-map", "1:a", "-shortest"]);
                     // A song that starts after the first rendered frame is delayed; volume as set.
@@ -227,15 +246,21 @@ impl RenderJob {
                 Sink::Video { tx: Some(tx), writer: Some(writer), child }
             }
         };
-        Ok(Self { next: s.start, settings: s, started: Instant::now(), sink, error: None, done: false, last_frame_ms: 0.0 })
+        Ok(Self { next: 0, settings: s, started: Instant::now(), sink, error: None, done: false, last_frame_ms: 0.0 })
     }
 
+    /// Number of video frames: the range's length in seconds times the video frame rate.
     pub fn total(&self) -> u32 {
-        self.settings.end.saturating_sub(self.settings.start) + 1
+        self.settings.video_frames()
     }
 
     pub fn progress(&self) -> f32 {
-        (self.next - self.settings.start) as f32 / self.total() as f32
+        self.next as f32 / self.total().max(1) as f32
+    }
+
+    /// The timeline position (in animation frames, may be fractional) of video frame `k`.
+    pub fn timeline_frame(&self, k: u32) -> f32 {
+        self.settings.start as f32 + k as f32 * self.settings.anim_fps.max(1.0) / self.settings.fps.max(1.0)
     }
 
     pub fn push_frame(&mut self, frame: u32, w: u32, h: u32, rgba: Vec<u8>) {

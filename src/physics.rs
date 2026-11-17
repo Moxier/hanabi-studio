@@ -33,6 +33,12 @@ pub struct PhysicsCfg {
     /// Distance (in model units per frame) that counts as a big move.
     pub big_move_dist: f32,
     pub settle_steps: u32,
+    /// Multiplies every part's damping (live).
+    pub damping_mul: f32,
+    /// Multiplies every joint spring (live).
+    pub spring_mul: f32,
+    /// Fixed physics step in seconds; 0 = follow the frame rate (split into sub-steps).
+    pub fixed_step: f32,
 }
 
 impl Default for PhysicsCfg {
@@ -48,6 +54,9 @@ impl Default for PhysicsCfg {
             big_move: BigMove::Snap,
             big_move_dist: 4.0,
             settle_steps: 40,
+            damping_mul: 1.0,
+            spring_mul: 1.0,
+            fixed_step: 0.0,
         }
     }
 }
@@ -80,6 +89,12 @@ pub struct Physics {
     modes: Vec<RigidMode>,
     bones: Vec<i32>,
     base_damping: Vec<f32>,
+    base_ang_damping: Vec<f32>,
+    /// Each simulated joint: engine handle, model joint index, the two bodies, the joint point
+    /// in body A's space, and its springs (lin xyz, ang xyz) as read from the model.
+    joint_info: Vec<(ImpulseJointHandle, usize, usize, usize, Vec3, [f32; 6])>,
+    applied_spring_mul: f32,
+    accum: f32,
     pub gravity: Vec3,
     pub substeps: u32,
     /// Times the simulation was snapped back after a big move (shown in the Physics window).
@@ -124,6 +139,7 @@ impl Physics {
         let mut modes = Vec::new();
         let mut bone_ids = Vec::new();
         let mut base_damping = Vec::new();
+        let mut base_ang_damping = Vec::new();
         for rb in &m.rigid_bodies {
             let rot = Quat::from_euler(EulerRot::YXZ, rb.rotation.y, rb.rotation.x, rb.rotation.z);
             let world = Mat4::from_rotation_translation(rot, rb.position);
@@ -164,11 +180,13 @@ impl Physics {
             modes.push(rb.mode);
             bone_ids.push(bone);
             base_damping.push(damping(rb.linear_damping));
+            base_ang_damping.push(damping(rb.angular_damping));
         }
+        let mut joint_info = Vec::new();
         let mut joints = ImpulseJointSet::new();
         let mut links: Vec<(usize, usize, Vec3, Vec3)> = Vec::new();
 
-        for j in &m.joints {
+        for (ji, j) in m.joints.iter().enumerate() {
             let (a, b) = (j.a, j.b);
             if a < 0 || b < 0 || a as usize >= handles.len() || b as usize >= handles.len() || a == b {
                 continue;
@@ -220,7 +238,11 @@ impl Physics {
                     gj.set_motor(ang[k], 0.0, 0.0, j.spring_ang[k], 0.1);
                 }
             }
-            joints.insert(ha, hb, gj, true);
+            let jh = joints.insert(ha, hb, gj, true);
+            let springs = [j.spring_lin.x, j.spring_lin.y, j.spring_lin.z, j.spring_ang.x, j.spring_ang.y, j.spring_ang.z];
+            let free: Vec<bool> = (0..6).map(|k| !locked.contains(if k < 3 { lin_bits[k] } else { ang_bits[k - 3] })).collect();
+            let springs: [f32; 6] = std::array::from_fn(|k| if free[k] { springs[k].max(0.0) } else { 0.0 });
+            joint_info.push((jh, ji, a as usize, b as usize, (pa.inverse() * jw).w_axis.truncate(), springs));
         }
         // Order the links outward from the bodies that follow bones (breadth first), so each
         // piece is corrected after the piece it hangs from.
@@ -266,6 +288,10 @@ impl Physics {
             modes,
             bones: bone_ids.clone(),
             base_damping,
+            base_ang_damping,
+            joint_info,
+            applied_spring_mul: 1.0,
+            accum: 0.0,
             gravity: Vec3::new(0.0, -98.0, 0.0),
             substeps: 2,
             snaps: 0,
@@ -294,6 +320,7 @@ impl Physics {
 
     /// Snap every body to its bone (after a jump in time).
     pub fn reset(&mut self, skel: &Skeleton) {
+        self.accum = 0.0;
         for i in 0..self.handles.len() {
             let Some(h) = self.handles[i] else { continue };
             let bg = if self.bones[i] >= 0 { skel.states[self.bones[i] as usize].global } else { Mat4::IDENTITY };
@@ -358,8 +385,26 @@ impl Physics {
                 BigMove::Off => {}
             }
         }
-        for (h, target) in targets {
-            self.bodies[h].set_next_kinematic_position(target);
+        // Joint springs follow the stiffness multiplier live.
+        if (cfg.spring_mul - self.applied_spring_mul).abs() > 1e-5 {
+            let axes = [JointAxis::LinX, JointAxis::LinY, JointAxis::LinZ, JointAxis::AngX, JointAxis::AngY, JointAxis::AngZ];
+            for (jh, _, _, _, _, springs) in &self.joint_info {
+                if let Some(j) = self.joints.get_mut(*jh, true) {
+                    for k in 0..6 {
+                        if springs[k] > 0.0 {
+                            j.data.set_motor(axes[k], 0.0, 0.0, springs[k] * cfg.spring_mul.max(0.0), 0.1);
+                        }
+                    }
+                }
+            }
+            self.applied_spring_mul = cfg.spring_mul;
+        }
+        let fixed = cfg.fixed_step > 0.0;
+        let starts: Vec<Pose> = if fixed { targets.iter().map(|(h, _)| *self.bodies[*h].position()).collect() } else { Vec::new() };
+        if !fixed {
+            for (h, target) in &targets {
+                self.bodies[*h].set_next_kinematic_position(*target);
+            }
         }
         // Wind (with gusts) and air drag on simulated parts.
         let wind = cfg.wind_vec();
@@ -376,12 +421,36 @@ impl Physics {
                 let m = b.mass();
                 b.add_force(wind * gust.max(0.0) * m, true);
             }
-            b.set_linear_damping(self.base_damping[i] + cfg.air_drag * 5.0);
+            b.set_linear_damping(self.base_damping[i] * cfg.damping_mul + cfg.air_drag * 5.0);
+            b.set_angular_damping(self.base_ang_damping[i] * cfg.damping_mul);
         }
-        let n = self.substeps.max(1);
-        self.params.dt = (dt / n as f32).clamp(1.0 / 960.0, 1.0 / 30.0);
+        // Either split this frame's time into sub-steps, or advance in equal fixed steps
+        // (carrying left-over time to the next frame) and move bone-following parts evenly.
+        let n = if fixed {
+            let h = cfg.fixed_step.clamp(1.0 / 960.0, 1.0 / 20.0);
+            self.params.dt = h;
+            self.accum += dt.clamp(0.0, 0.25);
+            let mut n = (self.accum / h + 1e-4).floor() as u32;
+            if n > 32 {
+                n = 32;
+                self.accum = n as f32 * h;
+            }
+            self.accum = (self.accum - n as f32 * h).max(0.0);
+            n
+        } else {
+            let n = self.substeps.max(1);
+            self.params.dt = (dt / n as f32).clamp(1.0 / 960.0, 1.0 / 30.0);
+            n
+        };
         let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            for _ in 0..n {
+            for k in 0..n {
+                if fixed {
+                    let t = (k + 1) as f32 / n as f32;
+                    for ((hd, target), start) in targets.iter().zip(&starts) {
+                        let pose = Pose::from_parts(start.translation.lerp(target.translation, t), start.rotation.slerp(target.rotation, t));
+                        self.bodies[*hd].set_next_kinematic_position(pose);
+                    }
+                }
                 self.pipeline.step(
                     self.gravity,
                     &self.params,
@@ -478,13 +547,25 @@ impl Physics {
     }
 
     /// Debug shapes for the viewport: (world transform, shape, size, dynamic).
-    pub fn debug_shapes(&self, m: &ModelData) -> Vec<(Mat4, Shape, Vec3, bool)> {
+    pub fn debug_shapes(&self, m: &ModelData) -> Vec<(usize, Mat4, Shape, Vec3, RigidMode)> {
         let mut v = Vec::new();
         for (i, rb) in m.rigid_bodies.iter().enumerate() {
             if let Some(Some(h)) = self.handles.get(i) {
-                v.push((from_pose(self.bodies[*h].position()), rb.shape, rb.size, rb.mode != RigidMode::FollowBone));
+                v.push((i, from_pose(self.bodies[*h].position()), rb.shape, rb.size, rb.mode));
             }
         }
         v
+    }
+
+    /// Joints for the view: (model joint index, joint point, centre of body A, centre of body B).
+    pub fn debug_joints(&self) -> Vec<(usize, Vec3, Vec3, Vec3)> {
+        self.joint_info
+            .iter()
+            .filter_map(|(_, ji, a, b, la, _)| {
+                let pa = from_pose(self.bodies[self.handles[*a]?].position());
+                let pb = from_pose(self.bodies[self.handles[*b]?].position());
+                Some((*ji, pa.transform_point3(*la), pa.w_axis.truncate(), pb.w_axis.truncate()))
+            })
+            .collect()
     }
 }

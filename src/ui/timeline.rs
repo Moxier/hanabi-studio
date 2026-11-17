@@ -492,11 +492,18 @@ impl App {
             ui.toggle_value(&mut self.tl.follow, "Follow").on_hover_text("Keep the playhead in view when the frame changes");
             ui.toggle_value(&mut self.scene.audio_scrub, "♪ Frame")
                 .on_hover_text("Play WAV with frame: while stopped, each frame you move to (arrow keys, clicking or dragging the timeline) plays that frame's bit of the song. Handy for lip-sync and beat timing.");
-            egui::ComboBox::from_id_salt("fps").width(64.0).selected_text(format!("{} fps", self.scene.fps)).show_ui(ui, |ui| {
-                for v in [24.0, 30.0, 60.0] {
-                    ui.selectable_value(&mut self.scene.fps, v, format!("{v} fps"));
-                }
-            });
+            egui::ComboBox::from_id_salt("fps")
+                .width(92.0)
+                .selected_text(format!("Anim {} fps", self.scene.fps))
+                .show_ui(ui, |ui| {
+                    ui.label(RichText::new("Keyframe rate of the animation. VMD dances and cameras are made at 30 fps: keep 30 for them, or they play faster or slower.\nThe video's frame rate is set separately on the Render page.").size(11.0).color(theme::TEXT_DIM));
+                    for v in [24.0, 30.0, 60.0] {
+                        let label = if v == 30.0 { "30 fps (VMD standard)".to_string() } else { format!("{v} fps") };
+                        ui.selectable_value(&mut self.scene.fps, v, label);
+                    }
+                })
+                .response
+                .on_hover_text("Animation frame rate (keyframes per second). The video frame rate is chosen on the Render page.");
             ui.separator();
             if ui.add(egui::Button::new(RichText::new("◆ Key").color(Color32::BLACK)).fill(theme::KEY)).on_hover_text("Register key (Enter)").clicked() {
                 self.register_selected();

@@ -71,7 +71,7 @@ impl App {
                 "effect_preset": self.graph.preset_name,
                 "color_grade": self.grade,
                 "audio": self.scene.audio.as_ref().map(|a| a.path.display().to_string()),
-                "render_job": self.job.as_ref().map(|j| json!({"progress": j.progress(), "frame": j.next, "end": j.settings.end, "path": j.settings.path.display().to_string()})),
+                "render_job": self.job.as_ref().map(|j| json!({"progress": j.progress(), "frame": j.next, "frames": j.total(), "end": j.settings.end, "path": j.settings.path.display().to_string()})),
             })),
             "load_file" => {
                 let p = PathBuf::from(s("path").ok_or("path is required")?);

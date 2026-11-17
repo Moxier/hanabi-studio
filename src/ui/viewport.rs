@@ -152,21 +152,88 @@ impl App {
         if tools {
             self.gizmo_and_bones(ui, &resp, &proj, &painter, rect);
         }
-        if self.scene.stage.show_rigid {
+        // Physics wireframes: rigid bodies (orange = simulated, blue = following a bone,
+        // green = simulated with the bone's position) and joints, with the part selected in the
+        // physics panel highlighted.
+        let sel = self.phys_sel;
+        if self.scene.stage.show_rigid || self.scene.stage.show_joints || sel.is_some() {
             for m in &self.scene.models {
-                if let Some(ph) = &m.physics {
-                    for (t, shape, size, dynamic) in ph.debug_shapes(&m.data) {
-                        let c = t.w_axis.truncate();
-                        if let (Some((p, depth)), Some(_)) = (proj.project(c), Some(())) {
-                            let units_px = depth * 2.0 * (self.scene.camera.fov.to_radians() * 0.5).tan() / rect.height();
-                            let r = match shape {
-                                crate::model::Shape::Sphere => size.x,
-                                crate::model::Shape::Box => size.max_element(),
-                                crate::model::Shape::Capsule => size.x + size.y * 0.5,
-                            } / units_px.max(1e-4);
-                            let col = if dynamic { Color32::from_rgba_unmultiplied(255, 170, 60, 120) } else { Color32::from_rgba_unmultiplied(90, 200, 255, 110) };
-                            painter.circle_stroke(p, r.min(400.0), Stroke::new(1.0, col));
+                let Some(ph) = &m.physics else { continue };
+                if !m.shown() {
+                    continue;
+                }
+                let picked = sel.filter(|s| s.0 == m.id);
+                let line = |a: Vec3, b: Vec3, st: Stroke| {
+                    if let (Some((pa, _)), Some((pb, _))) = (proj.project(m.world.transform_point3(a)), proj.project(m.world.transform_point3(b))) {
+                        painter.line_segment([pa, pb], st);
+                    }
+                };
+                for (i, t, shape, size, mode) in ph.debug_shapes(&m.data) {
+                    let is_sel = picked.map(|s| !s.1 && s.2 == i).unwrap_or(false);
+                    if !self.scene.stage.show_rigid && !is_sel {
+                        continue;
+                    }
+                    let col = if is_sel {
+                        Color32::WHITE
+                    } else {
+                        match mode {
+                            crate::model::RigidMode::FollowBone => Color32::from_rgba_unmultiplied(90, 200, 255, 120),
+                            crate::model::RigidMode::Physics => Color32::from_rgba_unmultiplied(255, 170, 60, 140),
+                            crate::model::RigidMode::PhysicsWithBonePosition => Color32::from_rgba_unmultiplied(140, 230, 120, 140),
                         }
+                    };
+                    let st = Stroke::new(if is_sel { 2.0 } else { 1.0 }, col);
+                    let ring = |center: Vec3, ax: Vec3, ay: Vec3, r: f32, from: f32, to: f32| {
+                        let n = 16;
+                        let mut prev = None;
+                        for k in 0..=n {
+                            let a = from + (to - from) * k as f32 / n as f32;
+                            let p = t.transform_point3(center + (ax * a.cos() + ay * a.sin()) * r);
+                            if let Some(q) = prev {
+                                line(q, p, st);
+                            }
+                            prev = Some(p);
+                        }
+                    };
+                    let tau = std::f32::consts::TAU;
+                    let pi = std::f32::consts::PI;
+                    match shape {
+                        crate::model::Shape::Box => {
+                            let c: Vec<Vec3> = (0..8).map(|k| t.transform_point3(Vec3::new(if k & 1 == 0 { -size.x } else { size.x }, if k & 2 == 0 { -size.y } else { size.y }, if k & 4 == 0 { -size.z } else { size.z }))).collect();
+                            for (a, b) in [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)] {
+                                line(c[a], c[b], st);
+                            }
+                        }
+                        crate::model::Shape::Sphere => {
+                            ring(Vec3::ZERO, Vec3::X, Vec3::Y, size.x, 0.0, tau);
+                            ring(Vec3::ZERO, Vec3::X, Vec3::Z, size.x, 0.0, tau);
+                            ring(Vec3::ZERO, Vec3::Y, Vec3::Z, size.x, 0.0, tau);
+                        }
+                        crate::model::Shape::Capsule => {
+                            let (r, h) = (size.x, size.y * 0.5);
+                            ring(Vec3::Y * h, Vec3::X, Vec3::Z, r, 0.0, tau);
+                            ring(-Vec3::Y * h, Vec3::X, Vec3::Z, r, 0.0, tau);
+                            ring(Vec3::Y * h, Vec3::X, Vec3::Y, r, 0.0, pi);
+                            ring(Vec3::Y * h, Vec3::Z, Vec3::Y, r, 0.0, pi);
+                            ring(-Vec3::Y * h, Vec3::X, Vec3::Y, r, pi, tau);
+                            ring(-Vec3::Y * h, Vec3::Z, Vec3::Y, r, pi, tau);
+                            for d in [Vec3::X, -Vec3::X, Vec3::Z, -Vec3::Z] {
+                                line(t.transform_point3(d * r + Vec3::Y * h), t.transform_point3(d * r - Vec3::Y * h), st);
+                            }
+                        }
+                    }
+                }
+                for (ji, at, ca, cb) in ph.debug_joints() {
+                    let is_sel = picked.map(|s| s.1 && s.2 == ji).unwrap_or(false);
+                    if !self.scene.stage.show_joints && !is_sel {
+                        continue;
+                    }
+                    let col = if is_sel { Color32::WHITE } else { Color32::from_rgba_unmultiplied(255, 90, 200, 170) };
+                    let st = Stroke::new(if is_sel { 2.0 } else { 1.0 }, col);
+                    line(ca, at, st);
+                    line(at, cb, st);
+                    if let Some((p, _)) = proj.project(m.world.transform_point3(at)) {
+                        painter.circle_filled(p, if is_sel { 4.0 } else { 2.5 }, col);
                     }
                 }
             }

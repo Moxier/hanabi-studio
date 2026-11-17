@@ -1,6 +1,7 @@
 //! Format-independent model data. PMX, PMD and X loaders all produce a `ModelData`.
 
 use glam::{Quat, Vec2, Vec3, Vec4};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -180,21 +181,21 @@ pub struct Morph {
     pub kind: MorphKind,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Shape {
     Sphere,
     Box,
     Capsule,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum RigidMode {
     FollowBone,
     Physics,
     PhysicsWithBonePosition,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RigidBody {
     pub name: String,
     pub bone: i32,
@@ -212,7 +213,7 @@ pub struct RigidBody {
     pub mode: RigidMode,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Joint {
     pub name: String,
     pub a: i32,

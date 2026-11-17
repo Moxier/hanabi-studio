@@ -1075,6 +1075,12 @@ uniform float u_look_k;
 uniform int u_split;
 uniform float u_split_pos;
 uniform vec2 u_texel;
+uniform sampler3D u_lut;
+uniform int u_lut_on;
+uniform float u_lut_k;
+uniform float u_lut_n;
+uniform vec3 u_lut_min;
+uniform vec3 u_lut_max;
 out vec4 o;
 float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 vec3 look(vec3 c, int k) {
@@ -1110,6 +1116,11 @@ void main() {
         float sat = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
         c = mix(vec3(l), c, u_saturation * (1.0 + u_vibrance * (1.0 - sat)));
         if (u_look > 0) c = mix(c, look(clamp(c, 0.0, 1.0), u_look), u_look_k);
+        if (u_lut_on == 1) {
+            vec3 t = clamp((c - u_lut_min) / max(u_lut_max - u_lut_min, vec3(1e-5)), 0.0, 1.0);
+            t = t * ((u_lut_n - 1.0) / u_lut_n) + 0.5 / u_lut_n;
+            c = mix(c, texture(u_lut, t).rgb, u_lut_k);
+        }
     }
     c = clamp(c, 0.0, 1.0);
     if (u_split == 1 && abs(v_uv.x - u_split_pos) < u_texel.x * 1.5) c = vec3(1.0);

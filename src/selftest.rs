@@ -279,10 +279,25 @@ pub fn run(root: &Path, deep: bool) -> i32 {
             let mut nan_frame = None;
             let mut f = 0.0;
             scene.force_reset_physics();
+            // Jitter: how sharply physics parts change direction from frame to frame, measured in
+            // their parent's space (so the dancer's own movement doesn't count). Smooth swinging
+            // gives small numbers; buzzing, popping or snapping gives spikes.
+            let (mut hist1, mut hist2): (Vec<glam::Vec3>, Vec<glam::Vec3>) = (Vec::new(), Vec::new());
+            let (mut jit_sum, mut jit_n, mut jit_max) = (0.0f64, 0usize, 0.0f32);
             while f <= end as f32 {
                 scene.frame = f;
                 scene.evaluate();
                 let m = &scene.models[i];
+                let now_l = local_physics_positions(m, d);
+                if m.visible && hist2.len() == now_l.len() && f >= 3.0 {
+                    for k in 0..now_l.len() {
+                        let a = (now_l[k] - 2.0 * hist1[k] + hist2[k]).length();
+                        jit_sum += a as f64;
+                        jit_n += 1;
+                        jit_max = jit_max.max(a);
+                    }
+                }
+                hist2 = std::mem::replace(&mut hist1, now_l);
                 if nan_frame.is_none() && m.skin.iter().any(|s| !s.is_finite()) {
                     nan_frame = Some(f as u32);
                 }
@@ -311,6 +326,38 @@ pub fn run(root: &Path, deep: bool) -> i32 {
             }
             let secs = t0.elapsed().as_secs_f32();
             let fps = (end as f32 + 1.0) / secs.max(1e-6);
+            // Settling: stop the dance mid-way and hold still for 3 s; hair and cloth should come
+            // to rest instead of bouncing or buzzing.
+            let hold = (end / 2) as f32;
+            scene.frame = hold;
+            scene.force_reset_physics();
+            for k in 0..=(hold as u32) {
+                scene.frame = k as f32;
+                scene.evaluate();
+            }
+            let cfg = scene.physics_cfg.clone();
+            let mut last = local_physics_positions(&scene.models[i], d);
+            let mut speeds = Vec::new();
+            for k in 0..90 {
+                scene.models[i].evaluate(hold, Some(1.0 / 30.0), true, &cfg, hold / 30.0 + k as f32 / 30.0);
+                let now = local_physics_positions(&scene.models[i], d);
+                let sp: f32 = now.iter().zip(&last).map(|(a, b)| (*a - *b).length()).sum::<f32>() / now.len().max(1) as f32 * 30.0;
+                speeds.push(sp);
+                last = now;
+            }
+            if std::env::var_os("HST_SETTLE").is_some() {
+                // Which parts are still moving after the hold (for diagnosing buzzing rigs).
+                let before = local_physics_positions(&scene.models[i], d);
+                scene.models[i].evaluate(hold, Some(1.0 / 30.0), true, &cfg, 99.0);
+                let after = local_physics_positions(&scene.models[i], d);
+                let names: Vec<&str> = d.bones.iter().enumerate().filter(|(bi, b)| scene.models[i].physics_bones[*bi] && b.parent >= 0).map(|(_, b)| b.name.as_str()).collect();
+                let mut mv: Vec<(f32, &str)> = before.iter().zip(&after).zip(&names).map(|((x, y), n)| ((*x - *y).length() * 30.0, *n)).collect();
+                mv.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap());
+                println!("      still moving: {}", mv.iter().take(8).map(|(v, n)| format!("{n} {v:.2}")).collect::<Vec<_>>().join(", "));
+            }
+            let settle_at = speeds.iter().rposition(|&v| v > 0.05).map(|k| (k + 1) as f32 / 30.0).unwrap_or(0.0);
+            let residual = speeds[60..].iter().sum::<f32>() / 30.0;
+            let jitter = if jit_n > 0 { (jit_sum / jit_n as f64) as f32 } else { 0.0 };
             let verdict = if nan_frame.is_some() {
                 failures += 1;
                 "FAIL"
@@ -321,7 +368,7 @@ pub fn run(root: &Path, deep: bool) -> i32 {
                 "ok  "
             };
             println!(
-                "{verdict}  {} + {}: {matched}/{} bones, {morph_matched}/{} morphs matched ({renamed} long names restored), {} frames at {fps:.0} fps (motion + IK + physics), worst physics stretch ×{worst_stretch:.2} at frame {worst_frame}, widest gap {worst_gap:.2} units ({worst_bone}){}",
+                "{verdict}  {} + {}: {matched}/{} bones, {morph_matched}/{} morphs matched ({renamed} long names restored), {} frames at {fps:.0} fps (motion + IK + physics), worst physics stretch ×{worst_stretch:.2} at frame {worst_frame}, widest gap {worst_gap:.2} units ({worst_bone}), jitter avg {jitter:.4} max {jit_max:.2}, settles in {settle_at:.1} s (still moving {residual:.3}/s after 2 s){}",
                 short(root, &model.path),
                 short(root, mp),
                 motion.bones.len(),
@@ -329,6 +376,41 @@ pub fn run(root: &Path, deep: bool) -> i32 {
                 end + 1,
                 nan_frame.map(|f| format!(", broken numbers from frame {f}")).unwrap_or_default()
             );
+        }
+    }
+    // Physics presets: a tweak is saved for the model and comes back when it loads again,
+    // and the model file stays untouched. Writes to the settings folder, so only on request
+    // (HANABI_TEST_PRESETS=1, usually with XDG_CONFIG_HOME pointing at a temporary folder).
+    if std::env::var_os("HANABI_TEST_PRESETS").is_some() {
+        if let Some(first) = dancers.first() {
+            println!("\n## Physics presets\n");
+            let path = first.path.clone();
+            let before = std::fs::read(&path).map(|b| crate::phystune::fingerprint(&b)).unwrap_or_default();
+            let mut scene = Scene::new();
+            scene.models.clear();
+            let _ = scene.load_path(&path);
+            let m = &mut scene.models[0];
+            let mut rb = m.data.rigid_bodies[0].clone();
+            rb.mass *= 2.0;
+            rb.mask = 0;
+            rb.mode = crate::model::RigidMode::FollowBone;
+            m.phys_tweaks.bodies.insert(0, rb.clone());
+            m.rebuild_physics();
+            let saved = m.file_key.as_ref().map(|k| crate::phystune::save(k, &m.phys_tweaks));
+            let mut again = Scene::new();
+            again.models.clear();
+            let msg = again.load_path(&path).unwrap_or_default();
+            let back = &again.models[0].data.rigid_bodies[0];
+            let after = std::fs::read(&path).map(|b| crate::phystune::fingerprint(&b)).unwrap_or_default();
+            let ok = back == &rb && before == after && matches!(saved, Some(Ok(())));
+            println!("{}  tweak saved and re-applied on load: {} · model file unchanged: {} · {}", if ok { "ok  " } else { "FAIL" }, back == &rb, before == after, msg);
+            if !ok {
+                failures += 1;
+            }
+            // Clean up the test preset.
+            if let Some(k) = &again.models[0].file_key {
+                let _ = crate::phystune::save(k, &Default::default());
+            }
         }
     }
     // Crowd: five dancers with physics on the biggest stage, all on one timeline.
@@ -377,4 +459,14 @@ impl OrDefaultName for Option<(String, crate::model::RigidMode)> {
     fn unwrap_or_default_name(self) -> (String, crate::model::RigidMode) {
         self.unwrap_or(("-".into(), crate::model::RigidMode::FollowBone))
     }
+}
+
+/// Positions of the physics-moved bones in their parent bone's space.
+fn local_physics_positions(m: &ModelInstance, d: &crate::model::ModelData) -> Vec<glam::Vec3> {
+    d.bones
+        .iter()
+        .enumerate()
+        .filter(|(bi, b)| m.physics_bones[*bi] && b.parent >= 0)
+        .map(|(bi, b)| m.skel.states[b.parent as usize].global.inverse().transform_point3(m.skel.global_pos(bi)))
+        .collect()
 }

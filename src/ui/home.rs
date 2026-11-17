@@ -6,8 +6,7 @@ use crate::effects::EffectGraph;
 use crate::grade::ColorGrade;
 use crate::material::SceneLight;
 use crate::scene::Scene;
-use crate::ui::theme;
-use egui::{vec2, Color32, CornerRadius, RichText, Sense, Stroke};
+use egui::{Color32, RichText};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
