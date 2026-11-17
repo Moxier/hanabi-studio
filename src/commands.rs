@@ -12,15 +12,16 @@ fn v3(v: &Value) -> Option<glam::Vec3> {
     Some(glam::Vec3::new(a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32, a.get(2)?.as_f64()? as f32))
 }
 
-fn curve_named(s: &str) -> Curve {
-    match s {
+fn curve_named(s: &str) -> Result<Curve, String> {
+    Ok(match s {
         "linear" => Curve::LINEAR,
         "ease_in" => Curve::EASE_IN,
         "ease_out" => Curve::EASE_OUT,
         "snappy" => Curve::SHARP,
         "hold" => Curve::STEP,
-        _ => Curve::EASE_IN_OUT,
-    }
+        "" | "smooth" | "ease_in_out" => Curve::EASE_IN_OUT,
+        other => return Err(format!("unknown curve “{other}”; use linear, smooth, ease_in, ease_out, snappy or hold")),
+    })
 }
 
 impl App {
@@ -71,6 +72,10 @@ impl App {
                 "effect_preset": self.graph.preset_name,
                 "color_grade": self.grade,
                 "audio": self.scene.audio.as_ref().map(|a| a.path.display().to_string()),
+                "last_render": self.last_render.as_ref().map(|r| match r {
+                    Ok(m) => json!({"ok": true, "message": m}),
+                    Err(e) => json!({"ok": false, "message": e}),
+                }),
                 "render_job": self.job.as_ref().map(|j| json!({"progress": j.progress(), "frame": j.next, "frames": j.total(), "end": j.settings.end, "path": j.settings.path.display().to_string()})),
             })),
             "load_file" => {
@@ -119,7 +124,10 @@ impl App {
                 Ok(json!(m.data.morphs.iter().enumerate().filter(|(_, mo)| f.is_empty() || mo.name.contains(&f)).map(|(i, mo)| json!({"name": mo.name, "english": mo.name_en, "weight": m.morph_weights[i]})).collect::<Vec<_>>()))
             }
             "set_frame" => {
-                let f = n("frame").ok_or("frame is required")?;
+                let f = match a.get("frame") {
+                    None => return Err("frame is required".into()),
+                    Some(v) => v.as_f64().ok_or("frame must be a number")? as f32,
+                };
                 self.scene.set_frame(f.max(0.0).round());
                 Ok(json!(format!("Frame {}", self.scene.frame)))
             }
@@ -151,6 +159,7 @@ impl App {
                 if let Some(pos) = a.get("position").and_then(v3) {
                     p = pos;
                 }
+                let curve = curve_named(&s("curve").unwrap_or_default())?;
                 if b("key") {
                     self.checkpoint();
                 }
@@ -159,9 +168,8 @@ impl App {
                 self.scene.models[mi].skel.states[bi].anim_rot = r;
                 self.sel_bone = Some(bi);
                 if b("key") {
-                    let c = curve_named(&s("curve").unwrap_or_default());
                     let f = self.scene.frame.round() as u32;
-                    self.scene.models[mi].register_bone_key(bi, f, [c; 4]);
+                    self.scene.models[mi].register_bone_key(bi, f, [curve; 4]);
                     return Ok(json!(format!("Posed and keyed {bone} at frame {f}")));
                 }
                 Ok(json!(format!("Posed {bone} (not keyed)")))
@@ -330,6 +338,9 @@ impl App {
             }
             "render_image" => {
                 let p = PathBuf::from(s("path").ok_or("path is required")?);
+                if !p.is_absolute() {
+                    return Err(format!("path must be absolute (got “{}”)", p.display()));
+                }
                 let (w0, h0) = (self.render_settings.width, self.render_settings.height);
                 if let (Some(w), Some(h)) = (n("width"), n("height")) {
                     self.render_settings.width = (w as u32).clamp(16, 8192);
@@ -458,13 +469,22 @@ impl App {
             "set_material" => {
                 use crate::material::{builtin_material_presets, MaterialFx, Special};
                 let name = s("material").ok_or("material is required")?;
+                let known: Vec<String> = self.scene.models.iter().flat_map(|m| m.data.materials.iter().map(|x| x.name.clone())).collect();
+                if !known.contains(&name) {
+                    let mut list = known.clone();
+                    list.sort();
+                    list.dedup();
+                    return Err(format!("no material named “{name}”. Materials in the scene: {}", list.into_iter().take(60).collect::<Vec<_>>().join(", ")));
+                }
                 if b("auto") {
                     self.graph.mat_fx.remove(&name);
                     return Ok(json!(format!("{name}: automatic")));
                 }
                 let mut fx = self.graph.mat_fx.get(&name).cloned().unwrap_or_else(|| MaterialFx::from_preset(crate::effects::MatPreset::guess(&name), 0.55));
                 if let Some(pn) = s("preset") {
-                    let (_, m) = builtin_material_presets().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(&pn)).ok_or(format!("no material preset {pn}"))?;
+                    let all = builtin_material_presets();
+                    let names: Vec<String> = all.iter().map(|(n, _)| n.to_string()).collect();
+                    let (_, m) = all.into_iter().find(|(n, _)| n.eq_ignore_ascii_case(&pn)).ok_or(format!("no material preset “{pn}”; presets: {}", names.join(", ")))?;
                     fx = m;
                 }
                 if let Some(sp) = s("special") {
@@ -475,7 +495,8 @@ impl App {
                         "fur" => Special::Fur,
                         "grass" => Special::Grass,
                         "glow" | "luminous" => Special::Glow,
-                        _ => Special::None,
+                        "none" | "" => Special::None,
+                        other => return Err(format!("unknown special “{other}”; use none, glass, water, wet, fur, grass or glow")),
                     };
                 }
                 if let Some(v) = n("roughness") {

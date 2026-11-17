@@ -100,11 +100,10 @@ impl App {
                         fmt_len(eta)
                     )).fill(theme::ACCENT));
                     if ui.button("Cancel").clicked() {
-                        if let Some(j) = self.job.as_mut() {
-                            j.cancel();
-                        }
+                        let msg = self.job.as_mut().map(|j| j.cancel()).unwrap_or_else(|| "Render cancelled".into());
                         self.job = None;
-                        self.set_status("Render cancelled");
+                        self.last_render = Some(Err(msg.clone()));
+                        self.set_status(msg);
                     }
                 } else {
                     let mut s = self.render_settings.clone();

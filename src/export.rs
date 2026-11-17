@@ -227,7 +227,7 @@ impl RenderJob {
                         cmd.args(["-c:v", "libx264", "-preset", "fast", "-crf", &s.quality.to_string(), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k"]);
                     }
                     OutFormat::WebM => {
-                        cmd.args(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", &(s.quality + 12).to_string(), "-row-mt", "1", "-c:a", "libopus"]);
+                        cmd.args(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", &(s.quality + 12).to_string(), "-row-mt", "1", "-pix_fmt", "yuv420p", "-c:a", "libopus"]);
                     }
                     _ => {
                         cmd.args(["-c:v", "prores_ks", "-profile:v", "3", "-c:a", "pcm_s16le"]);
@@ -293,24 +293,41 @@ impl RenderJob {
         match &mut self.sink {
             Sink::Video { tx, writer, child } => {
                 drop(tx.take());
-                if let Some(w) = writer.take() {
-                    if let Ok(Err(e)) = w.join() {
-                        return Err(e);
-                    }
-                }
+                let write_err = match writer.take().map(|w| w.join()) {
+                    Some(Ok(Err(e))) => Some(e),
+                    _ => None,
+                };
+                // Always wait for ffmpeg and read what it said: its message explains a failure
+                // far better than "broken pipe".
                 let out = child.wait().map_err(|e| e.to_string())?;
-                if !out.success() {
-                    let mut err = String::new();
-                    if let Some(mut s) = child.stderr.take() {
-                        use std::io::Read;
-                        let _ = s.read_to_string(&mut err);
-                    }
-                    return Err(format!("ffmpeg failed: {}", err.lines().last().unwrap_or("unknown error")));
+                let mut err = String::new();
+                if let Some(mut st) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = st.read_to_string(&mut err);
+                }
+                let said: Vec<&str> = err.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+                let said = said.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join(" · ");
+                if !out.success() || write_err.is_some() {
+                    let _ = std::fs::remove_file(&self.settings.path);
+                    return Err(if said.is_empty() {
+                        format!("Video export failed: {}", write_err.unwrap_or_else(|| format!("ffmpeg exited with {out}")))
+                    } else {
+                        format!("Video export failed (ffmpeg: {said})")
+                    });
+                }
+                let size = std::fs::metadata(&self.settings.path).map(|m| m.len()).unwrap_or(0);
+                if size == 0 {
+                    let _ = std::fs::remove_file(&self.settings.path);
+                    return Err(format!("Video export failed: ffmpeg wrote an empty file{}", if said.is_empty() { String::new() } else { format!(" ({said})") }));
                 }
             }
-            Sink::Png { pending, .. } => {
+            Sink::Png { pending, dir } => {
                 for h in pending.drain(..) {
                     let _ = h.join();
+                }
+                let n = std::fs::read_dir(&*dir).map(|r| r.flatten().filter(|e| e.path().extension().map(|x| x == "png").unwrap_or(false)).count()).unwrap_or(0);
+                if n == 0 {
+                    return Err(format!("Image export failed: no PNG files were written to {}", dir.display()));
                 }
             }
         }
@@ -324,11 +341,16 @@ impl RenderJob {
         ))
     }
 
-    pub fn cancel(&mut self) {
+    /// Stop a render. A half-written video file is removed (PNG frames already written stay).
+    pub fn cancel(&mut self) -> String {
         self.done = true;
         if let Sink::Video { tx, child, .. } = &mut self.sink {
             drop(tx.take());
             let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&self.settings.path);
+            return format!("Render cancelled after {} of {} frames; the unfinished video file was removed", self.next, self.total());
         }
+        format!("Render cancelled after {} of {} frames; the frames already written stay in {}", self.next, self.total(), self.settings.path.display())
     }
 }

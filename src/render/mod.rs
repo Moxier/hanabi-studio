@@ -137,6 +137,8 @@ pub struct Renderer {
     output: Option<Target>,
     spare: TargetSet,
     slot: usize,
+    /// When the export target set (slot 1) was last used; freed again shortly after.
+    export_used: Option<std::time::Instant>,
     pub particles: HashMap<u32, ParticleSim>,
     pub stats: RenderStats,
     bone_scratch: Vec<f32>,
@@ -332,6 +334,7 @@ impl Renderer {
                 bloom: Vec::new(),
                 output: None,
                 spare: TargetSet::default(),
+                export_used: None,
                 slot: 0,
                 particles: HashMap::new(),
                 stats: RenderStats::default(),
@@ -572,6 +575,38 @@ impl Renderer {
         unsafe {
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(g.dyn_vbo));
             gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, as_bytes(&buf));
+        }
+    }
+
+    /// Free the export targets (sized for stills and video renders, up to 8K) once they have
+    /// been idle for a moment. Keeping them, and re-creating them at every new export size, used
+    /// up GPU memory until the driver gave up.
+    pub fn release_idle_export_targets(&mut self, gl: &glow::Context) {
+        let Some(t) = self.export_used else { return };
+        if t.elapsed().as_secs_f32() < 1.0 {
+            return;
+        }
+        if self.slot == 1 {
+            self.select_slot(0);
+        }
+        let set = std::mem::take(&mut self.spare);
+        if let Some(t) = set.ms {
+            t.delete(gl);
+        }
+        for t in [set.scene_t, set.reflect, set.output].into_iter().flatten() {
+            t.delete(gl);
+        }
+        for t in set.pool.into_iter().chain(set.bloom) {
+            t.delete(gl);
+        }
+        if let Some((a, b)) = self.adapt[1].take() {
+            a.delete(gl);
+            b.delete(gl);
+        }
+        self.prev_vp[1] = None;
+        self.export_used = None;
+        unsafe {
+            gl.flush();
         }
     }
 
@@ -1083,6 +1118,9 @@ impl Renderer {
         self.stats = RenderStats::default();
         let (w, h) = (fp.width.max(16), fp.height.max(16));
         self.select_slot(fp.slot);
+        if fp.slot == 1 {
+            self.export_used = Some(std::time::Instant::now());
+        }
         self.gc_models(gl, fp.scene);
         self.ensure_targets(gl, w, h, fp.msaa);
         for m in &fp.scene.models {

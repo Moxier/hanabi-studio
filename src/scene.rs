@@ -68,6 +68,8 @@ pub struct ModelInstance {
     pub file_key: Option<String>,
     /// Physics is held (bones at the animation pose) while a part value is being dragged.
     pub physics_frozen: bool,
+    /// The name in the model file (the scene name can be changed; credits use this one).
+    pub orig_name: String,
     /// Stability score of the model's own physics (see physics::stability_test), for comparison.
     pub phys_base_score: Option<f32>,
     /// Object group this model or prop belongs to (see `Scene::groups`).
@@ -124,6 +126,7 @@ impl ModelInstance {
             phys_tweaks: Default::default(),
             file_key: None,
             physics_frozen: false,
+            orig_name: data.name.clone(),
             phys_base_score: None,
             data: Arc::new(data),
             physics_paused: false,
@@ -809,6 +812,9 @@ impl Scene {
 
     fn load_path_inner(&mut self, path: &Path) -> Result<String, String> {
         let data = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if data.is_empty() {
+            return Err(format!("{}: this file is empty (0 bytes), so there is nothing to load. Download it again?", path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
+        }
         let fname = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         match formats::kind_of(path) {
             FileKind::Model => {

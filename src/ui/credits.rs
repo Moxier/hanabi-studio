@@ -79,7 +79,7 @@ impl App {
             let character = !m.data.rigid_bodies.is_empty() || m.data.bone_index("上半身").is_some() || m.data.bone_index("頭").is_some();
             let kind = if m.is_accessory() { "Accessory" } else if character { "Model" } else { "Stage" };
             let note = m.data.comment.lines().map(str::trim).filter(|l| !l.is_empty()).take(6).collect::<Vec<_>>().join("\n");
-            v.push(Entry { kind, name: m.data.name.clone(), path: p.clone(), note });
+            v.push(Entry { kind, name: m.orig_name.clone(), path: p.clone(), note });
         }
         for p in &self.scene.sources {
             let kind = match crate::formats::kind_of(p) {
@@ -101,7 +101,11 @@ impl App {
             if items.is_empty() {
                 continue;
             }
-            out.push_str(&format!("\n{kind}s:\n"));
+            let plural = match kind {
+                "Accessory" => "Accessories".to_string(),
+                k => format!("{k}s"),
+            };
+            out.push_str(&format!("\n{plural}:\n"));
             for e in items {
                 let folder = e.path.parent().and_then(|d| d.file_name()).map(|n| crate::findfile::display_name(n)).unwrap_or_default();
                 out.push_str(&format!("- {} ({folder})\n", e.name));

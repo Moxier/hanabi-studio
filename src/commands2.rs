@@ -168,10 +168,15 @@ impl App {
                     .iter()
                     .enumerate()
                     .map(|(i, m)| {
-                        let character = !m.data.rigid_bodies.is_empty() || m.data.bone_index("上半身").is_some();
+                        let character = !m.data.rigid_bodies.is_empty() || m.data.bone_index("上半身").is_some() || m.data.bone_index("頭").is_some();
+                        let (lo, hi) = m.data.bounds();
+                        let small = (hi - lo).max_element() < 25.0;
                         json!({
-                            "index": i, "name": m.name(),
-                            "kind": if m.is_accessory() { "prop" } else if character { "model" } else { "stage" },
+                            "index": i, "name": m.name(), "file_name": m.orig_name,
+                            "kind": if m.is_accessory() || (!character && small) { "prop" } else if character { "model" } else { "stage" },
+                            "outline_width": m.edge_width,
+                            "placement": {"position": m.acc_pos.to_array(), "rotation_deg": m.acc_rot.to_array(), "scale": m.acc_scale, "opacity": m.acc_opacity,
+                                "attached_to": m.attach.and_then(|(pid, bi)| self.scene.model_by_id(pid).map(|pi| json!({"model": self.scene.models[pi].name(), "bone": self.scene.models[pi].data.bones.get(bi).map(|b| b.name.clone())})))},
                             "group": m.group.and_then(|g| self.scene.group_index(g)).map(|g| self.scene.groups[g].name.clone()),
                             "visible": m.visible, "shown": m.shown(), "physics": m.physics_enabled,
                             "file": m.data.path.as_ref().map(|p| p.display().to_string()),
@@ -346,7 +351,10 @@ impl App {
             }
             "select_bones" => (|| {
                 let mi = self.sel_model()?;
-                let mut set: std::collections::BTreeSet<usize> = if b("add") { self.selected_bones().into_iter().collect() } else { Default::default() };
+                let has_names = a.get("names").and_then(|v| v.as_array()).map(|l| !l.is_empty()).unwrap_or(false);
+                // With names: those bones (plus the current selection when add=true).
+                // Without names: the operation works on the current selection.
+                let mut set: std::collections::BTreeSet<usize> = if b("add") || !has_names { self.selected_bones().into_iter().collect() } else { Default::default() };
                 let mut missing = Vec::new();
                 if let Some(list) = a.get("names").and_then(|v| v.as_array()) {
                     for nm in list.iter().filter_map(|v| v.as_str()) {
@@ -553,6 +561,8 @@ impl App {
                     "flipped_links": m.physics.as_ref().map(|p| p.flipped).unwrap_or(0),
                     "max_flip_degrees": m.physics.as_ref().map(|p| p.max_flip_deg).unwrap_or(0.0),
                     "flip_events": m.physics.as_ref().map(|p| p.flip_events).unwrap_or(0),
+                    "hip_parts": m.physics.as_ref().map(|p| p.hip_parts()).unwrap_or(0),
+                    "skirt_hem_lift": m.physics.as_ref().map(|p| p.hem_height).unwrap_or(0.0),
                     "last_flip_parts": m.physics.as_ref().map(|p| p.last_flip.iter().take(12).filter_map(|&b| d.bones.get(b).map(|x| x.name.clone())).collect::<Vec<_>>()).unwrap_or_default(),
                     "flipped_parts": m.physics.as_ref().map(|p| p.flipped_bones.iter().take(12).filter_map(|&b| d.bones.get(b).map(|x| x.name.clone())).collect::<Vec<_>>()).unwrap_or_default(),
                     "changed_bodies": m.phys_tweaks.bodies.len(), "changed_joints": m.phys_tweaks.joints.len(),
@@ -760,6 +770,10 @@ impl App {
                     "msaa": r.msaa, "open_when_done": r.open_when_done, "path": r.path.display().to_string(),
                     "ffmpeg": crate::export::ffmpeg_path().map(|p| p.display().to_string()),
                     "rendering": self.job.as_ref().map(|j| json!({"progress": j.progress(), "frame": j.next, "frames": j.total()})),
+                    "last_result": self.last_render.as_ref().map(|r| match r {
+                        Ok(m) => json!({"ok": true, "message": m}),
+                        Err(e) => json!({"ok": false, "message": e}),
+                    }),
                 }))
             }
             "set_render_settings" => (|| {
@@ -788,11 +802,15 @@ impl App {
                 Ok(json!(format!("{}×{} · {} fps · frames {}–{} · {:?} → {}", r.width, r.height, r.fps, r.start, r.end, r.format, r.path.display())))
             })(),
             "cancel_render" => {
-                if let Some(j) = self.job.as_mut() {
-                    j.cancel();
+                let msg = self.job.as_mut().map(|j| j.cancel());
+                self.job = None;
+                match msg {
+                    Some(m) => {
+                        self.last_render = Some(Err(m.clone()));
+                        Ok(json!(m))
+                    }
+                    None => Ok(json!("no render running")),
                 }
-                let had = self.job.take().is_some();
-                Ok(json!(if had { "render cancelled" } else { "no render running" }))
             }
             _ => return None,
         })

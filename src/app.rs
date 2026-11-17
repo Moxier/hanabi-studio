@@ -200,6 +200,8 @@ pub struct App {
     /// A model whose part changes still need a rebuild (done when the mouse is released).
     pub phys_pending: Option<u64>,
     pub quit_at: Option<Instant>,
+    /// How the last video / image-sequence render ended (kept so it can't be missed).
+    pub last_render: Option<Result<String, String>>,
     pub phys_undo: Vec<crate::ui::phystune_ui::PhysState>,
     pub phys_redo: Vec<crate::ui::phystune_ui::PhysState>,
     /// An undo step is being collected (mouse still down), so a drag counts once.
@@ -380,6 +382,7 @@ impl App {
             phys_search: String::new(),
             phys_list_joints: false,
             phys_pending: None,
+            last_render: None,
             quit_at: args.quit_after.map(|s| Instant::now() + std::time::Duration::from_secs_f32(s)),
             phys_undo: Vec::new(),
             phys_redo: Vec::new(),
@@ -750,6 +753,9 @@ impl App {
                 m.acc_rot = pm.acc_rot;
                 m.acc_scale = pm.acc_scale;
                 m.acc_opacity = pm.acc_opacity;
+                if let Some(n) = pm.name.as_ref().filter(|n| !n.trim().is_empty()) {
+                    std::sync::Arc::make_mut(&mut m.data).name = n.clone();
+                }
             }
         }
         // attachments after all models exist
@@ -765,8 +771,7 @@ impl App {
         }
         scene.camera_motion = p.camera_motion;
         scene.fps = p.fps;
-        scene.play_start = p.range.0;
-        scene.play_end = p.range.1;
+
         scene.stage.background = p.background;
         scene.light.color = p.light.0;
         scene.light.direction = p.light.1;
@@ -796,6 +801,11 @@ impl App {
                 }
             }
         }
+        // Loading the song widens the range to its length; the saved range comes last.
+        scene.play_start = p.range.0;
+        scene.play_end = p.range.1.max(p.range.0);
+        scene.frame = p.frame.max(0.0);
+        scene.force_reset_physics();
         self.scene = scene;
         self.graph = p.effects;
         self.grade = p.grade;
@@ -929,6 +939,7 @@ impl App {
                 if e.contains("ffmpeg") {
                     self.show_video_help = true;
                 }
+                self.last_render = Some(Err(e.clone()));
                 self.set_error(e)
             }
         }
@@ -956,9 +967,16 @@ impl App {
                 job.push_frame(f, w, h, px);
             }
             job.next += 1;
-            if let Some(e) = job.error.clone() {
-                job.cancel();
+            if job.error.is_some() {
+                // ffmpeg stopped: collect its own message instead of a generic one.
+                let early = job.error.clone().unwrap_or_default();
+                let res = job.finish();
                 self.job = None;
+                let e = match res {
+                    Err(e) => e,
+                    Ok(_) => early,
+                };
+                self.last_render = Some(Err(e.clone()));
                 self.set_error(e);
                 break;
             }
@@ -969,6 +987,7 @@ impl App {
                     if p.is_dir() { p } else { p.parent().map(|d| d.to_path_buf()).unwrap_or(p) }
                 });
                 self.job = None;
+                self.last_render = Some(res.clone());
                 match res {
                     Ok(m) => {
                         if let Some(d) = open {
@@ -1435,6 +1454,9 @@ impl eframe::App for App {
         if self.job.is_some() {
             self.pump_render_job(frame);
         } else {
+            if let (Some(r), Some(gl)) = (self.renderer.as_mut(), frame.gl().cloned()) {
+                r.release_idle_export_targets(&gl);
+            }
             if !self.scene.playing {
                 self.wall_extra += dt;
             }

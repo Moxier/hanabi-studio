@@ -552,11 +552,14 @@ pub struct OwnMotionFile {
     pub format: String,
     pub version: u32,
     pub fps: f32,
+    /// Stored compactly (binary in base64, 48 bytes a key); version 1 files kept it as JSON and
+    /// still open.
+    #[serde(with = "crate::motionbin")]
     pub motion: Motion,
 }
 
 pub fn save_own(m: &Motion, fps: f32) -> Result<String, String> {
-    serde_json::to_string_pretty(&OwnMotionFile { format: "hanabi-motion".into(), version: 1, fps, motion: m.clone() })
+    serde_json::to_string(&OwnMotionFile { format: "hanabi-motion".into(), version: 2, fps, motion: m.clone() })
         .map_err(|e| e.to_string())
 }
 

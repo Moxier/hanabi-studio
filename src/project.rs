@@ -26,6 +26,9 @@ pub struct ProjModel {
     /// Index into `Project::groups`.
     #[serde(default)]
     pub group: Option<usize>,
+    /// The name shown in the scene, when it was renamed (the model file keeps its own name).
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -63,6 +66,9 @@ pub struct Project {
     pub audio_muted: bool,
     #[serde(default)]
     pub audio_scrub: bool,
+    /// Where the playhead was.
+    #[serde(default)]
+    pub frame: f32,
 }
 
 fn one() -> f32 {
@@ -89,6 +95,7 @@ pub fn save(scene: &Scene, effects: &EffectGraph, grade: &ColorGrade) -> Result<
             acc_scale: m.acc_scale,
             acc_opacity: m.acc_opacity,
             group: m.group.and_then(|g| scene.group_index(g)),
+            name: (m.data.name != m.orig_name).then(|| m.data.name.clone()),
         })
         .collect();
     let p = Project {
@@ -113,6 +120,7 @@ pub fn save(scene: &Scene, effects: &EffectGraph, grade: &ColorGrade) -> Result<
         audio_volume: scene.audio.as_ref().map(|a| a.volume).unwrap_or(1.0),
         audio_muted: scene.audio.as_ref().map(|a| a.muted).unwrap_or(false),
         audio_scrub: scene.audio_scrub,
+        frame: scene.frame,
     };
     serde_json::to_string(&p).map_err(|e| e.to_string())
 }
