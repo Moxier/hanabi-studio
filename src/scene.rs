@@ -70,6 +70,8 @@ pub struct ModelInstance {
     pub physics_frozen: bool,
     /// The name in the model file (the scene name can be changed; credits use this one).
     pub orig_name: String,
+    /// Motion and pose files loaded onto this model (shown on its card).
+    pub motion_files: Vec<PathBuf>,
     /// Stability score of the model's own physics (see physics::stability_test), for comparison.
     pub phys_base_score: Option<f32>,
     /// Object group this model or prop belongs to (see `Scene::groups`).
@@ -127,6 +129,7 @@ impl ModelInstance {
             file_key: None,
             physics_frozen: false,
             orig_name: data.name.clone(),
+            motion_files: Vec::new(),
             phys_base_score: None,
             data: Arc::new(data),
             physics_paused: false,
@@ -863,6 +866,9 @@ impl Scene {
                     return Err("Select a model first, then load the motion onto it.".into());
                 };
                 let m = &mut self.models[sel];
+                if !m.motion_files.iter().any(|p| p == path) {
+                    m.motion_files.push(path.to_path_buf());
+                }
                 let mut motion = motion;
                 motion.fit_to_model(&m.data);
                 let matched = motion.bones.keys().filter(|n| m.data.bone_index(n).is_some()).count();

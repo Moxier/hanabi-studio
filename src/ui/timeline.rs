@@ -400,7 +400,10 @@ impl App {
                         self.sel_bone = None;
                     }
                 }
-                _ => self.sel_camera = true,
+                _ => {
+                    self.sel_camera = true;
+                    self.sel_audio = false;
+                }
             }
         }
         if let Some((keys, add)) = select {

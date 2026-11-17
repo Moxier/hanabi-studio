@@ -104,6 +104,7 @@ impl App {
         self.sel_bone = active;
         self.sel_bones = (id, bones);
         self.sel_camera = false;
+        self.sel_audio = false;
         if active.is_some() {
             self.sel_morph = None;
         }

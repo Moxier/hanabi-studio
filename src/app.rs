@@ -146,6 +146,12 @@ pub struct App {
     pub sel_bone: Option<usize>,
     /// Other selected bones (model id, bone indices); the active bone is `sel_bone`.
     pub sel_bones: (u64, std::collections::BTreeSet<usize>),
+    /// The song is selected in the Scene panel (its settings show below the list).
+    pub sel_audio: bool,
+    /// Scene cards that are minimised ("obj:<id>", "audio", "camera").
+    pub card_collapsed: std::collections::HashSet<String>,
+    /// The Camera & Light card was asked for (it also shows when there are camera keys).
+    pub show_camera_card: bool,
     /// Inspector tab in the Animation workspace: 0 pose, 1 expressions, 2 tools.
     pub insp_tab: u8,
     pub bone_search: String,
@@ -333,6 +339,9 @@ impl App {
             ws,
             sel_bone: None,
             sel_bones: (0, Default::default()),
+            sel_audio: false,
+            card_collapsed: Default::default(),
+            show_camera_card: false,
             insp_tab: 0,
             bone_search: String::new(),
             morph_search: String::new(),
@@ -559,12 +568,31 @@ impl App {
         if is_motion {
             self.checkpoint();
         }
+        // A dance or pose goes onto the selected model; if the selection isn't a model (a stage,
+        // a prop, the camera, the song or nothing) and there is exactly one model, onto that one.
+        if is_motion || ext == "vpd" {
+            let is_model = |m: &crate::scene::ModelInstance| !m.is_accessory() && (!m.data.rigid_bodies.is_empty() || m.data.bone_index("上半身").is_some() || m.data.bone_index("頭").is_some());
+            let sel_ok = self.scene.selected.and_then(|i| self.scene.models.get(i)).map(|m| is_model(m)).unwrap_or(false) && !self.sel_camera && !self.sel_audio;
+            if !sel_ok {
+                let models: Vec<usize> = (0..self.scene.models.len()).filter(|&i| is_model(&self.scene.models[i])).collect();
+                if models.len() == 1 {
+                    self.scene.selected = Some(models[0]);
+                }
+            }
+        }
         match self.scene.load_path(p) {
             Ok(msg) => {
                 if matches!(ext.as_str(), "pmx" | "pmd" | "x") {
                     self.sel_bone = None;
                     self.sel_morph = None;
-                    // Attach new accessories to the previously selected model's centre? Keep at origin.
+                    self.sel_camera = false;
+                    self.sel_audio = false;
+                }
+                if ext == "wav" {
+                    self.select_audio();
+                }
+                if msg.starts_with("Loaded camera") {
+                    self.show_camera_card = true;
                 }
                 self.set_status(msg)
             }
@@ -579,6 +607,7 @@ impl App {
             "accessory" => ("Load accessory / stage", "Accessories (X)", &["x"]),
             "motion" => ("Load motion", "Motions (VMD / HMO)", &["vmd", "hmo"]),
             "pose" => ("Load pose", "Poses (VPD)", &["vpd"]),
+            "animation" => ("Load animation", "Motions and poses (VMD / HMO / VPD)", &["vmd", "hmo", "vpd"]),
             "audio" => ("Load audio", "Audio (WAV)", &["wav"]),
             _ => ("Open project", "Hanabi project", &["hproj"]),
         };
@@ -602,6 +631,15 @@ impl App {
             .add_filter("Projects", &["hproj"])
             .pick_files()
         {
+            let rank = |p: &std::path::PathBuf| match p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+                Some("hproj") => 0,
+                Some("pmx") | Some("pmd") => 1,
+                Some("x") => 2,
+                Some("wav") => 3,
+                _ => 4,
+            };
+            let mut files = files;
+            files.sort_by_key(rank);
             for f in files {
                 self.open_path(&f);
             }

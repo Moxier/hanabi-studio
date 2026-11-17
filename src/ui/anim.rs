@@ -306,8 +306,14 @@ impl App {
     }
 
     fn outliner(&mut self, ui: &mut egui::Ui) {
-        self.scene_panel(ui);
+        // The object list scrolls on its own; properties of the selection sit below it.
+        let list_h = (ui.available_height() * 0.55).max(160.0);
+        egui::ScrollArea::vertical().id_salt("scene_list").max_height(list_h).auto_shrink([false, true]).show(ui, |ui| self.scene_panel(ui));
         ui.separator();
+        if self.sel_audio && self.scene.audio.is_some() {
+            egui::ScrollArea::vertical().id_salt("audio_props").show(ui, |ui| self.audio_props(ui));
+            return;
+        }
         // Bones by display frame
         let Some(mi) = self.scene.selected.filter(|_| !self.sel_camera) else {
             ui.label(RichText::new(if self.sel_camera { "Camera selected: bones are hidden. Pick a model to pose it." } else { "Select a model to see its bones." }).color(theme::TEXT_DIM));
@@ -423,6 +429,10 @@ impl App {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
+        if self.sel_audio && self.scene.audio.is_some() {
+            egui::ScrollArea::vertical().id_salt("insp_audio").show(ui, |ui| self.audio_props(ui));
+            return;
+        }
         if self.sel_camera {
             egui::ScrollArea::vertical().show(ui, |ui| self.camera_inspector(ui));
             return;
