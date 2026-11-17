@@ -207,6 +207,7 @@ pub struct App {
     /// A physics change that failed the stability check: (model id, message).
     pub phys_warning: Option<(u64, String)>,
     pub phys_blowups_seen: u32,
+    pub phys_flips_seen: u32,
     pub phys_win_rect: egui::Rect,
     pub confirm: Option<crate::ui::home::Confirm>,
     pub home: bool,
@@ -385,6 +386,7 @@ impl App {
             phys_edit_open: false,
             phys_warning: None,
             phys_blowups_seen: 0,
+            phys_flips_seen: 0,
             phys_win_rect: egui::Rect::NOTHING,
             confirm: None,
             home: start_home,

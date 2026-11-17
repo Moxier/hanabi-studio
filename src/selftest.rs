@@ -375,7 +375,12 @@ pub fn run(root: &Path, deep: bool) -> i32 {
                 motion.bones.len(),
                 motion.morphs.len(),
                 end + 1,
-                scene.models[i].physics.as_ref().map(|p| p.blowups).unwrap_or(0),
+                format!(
+                    "{}, flip events {}{}",
+                    scene.models[i].physics.as_ref().map(|p| p.blowups).unwrap_or(0),
+                    scene.models[i].physics.as_ref().map(|p| p.flip_events).unwrap_or(0),
+                    scene.models[i].physics.as_ref().filter(|p| p.flip_events > 0).map(|p| format!(" ({})", p.last_flip.iter().take(4).filter_map(|&b| d.bones.get(b).map(|x| x.name.clone())).collect::<Vec<_>>().join(", "))).unwrap_or_default()
+                ),
                 nan_frame.map(|f| format!(", broken numbers from frame {f}")).unwrap_or_default()
             );
         }

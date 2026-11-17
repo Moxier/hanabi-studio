@@ -116,8 +116,22 @@ pub struct Physics {
     /// flipped chains.
     chain_rest: Vec<Option<(usize, usize, Vec3)>>,
     /// Steps in a row with torn / flipped chain links (so brief swings don't count).
+    /// For each simulated part: (its bone, the nearest bone above it that physics doesn't move
+    /// — the hip for a skirt, the head for hair — and the rest offset between them). A whole
+    /// skirt swinging up past the hip keeps every link straight, so flips are judged against
+    /// this anchor.
+    chain_anchor: Vec<(usize, usize, Vec3)>,
     tear_run: u32,
     flip_run: u32,
+    /// Largest turn (degrees) of a simulated part away from its rest direction, seen from its
+    /// anchor, in the last step; and the parts turned past the flip limit.
+    pub max_flip_deg: f32,
+    pub flipped_bones: Vec<usize>,
+    /// Times a skirt / hair chain stayed turned over for half a second (reported, not reset:
+    /// a crouch or a raised arm can do this on purpose).
+    pub flip_events: u32,
+    /// Parts in the latest such flip.
+    pub last_flip: Vec<usize>,
     /// Chain links torn apart / turned inside out in the last step.
     pub torn: usize,
     pub flipped: usize,
@@ -131,6 +145,10 @@ pub struct Physics {
     bone_parent: Vec<i32>,
     order: Vec<usize>,
 }
+
+/// A simulated part counts as flipped when it has turned more than this far from its rest
+/// direction, seen from the body part it hangs from.
+const FLIP_DEG: f32 = 120.0;
 
 fn to_pose(m: &Mat4) -> Pose {
     let (_, r, t) = m.to_scale_rotation_translation();
@@ -367,6 +385,39 @@ impl Physics {
                     })
                     .collect()
             },
+            chain_anchor: {
+                let mut sim_bone = vec![false; m.bones.len()];
+                for (i, rb) in m.rigid_bodies.iter().enumerate() {
+                    if rb.mode != RigidMode::FollowBone && rb.bone >= 0 && (rb.bone as usize) < m.bones.len() && jointed[i] {
+                        sim_bone[rb.bone as usize] = true;
+                    }
+                }
+                let mut v = Vec::new();
+                for (b, is_sim) in sim_bone.iter().enumerate() {
+                    if !is_sim {
+                        continue;
+                    }
+                    let mut a = m.bones[b].parent;
+                    let mut guard = 0;
+                    while a >= 0 && sim_bone[a as usize] && guard < 256 {
+                        a = m.bones[a as usize].parent;
+                        guard += 1;
+                    }
+                    if a < 0 {
+                        continue;
+                    }
+                    let off = m.bones[b].position - m.bones[a as usize].position;
+                    // Parts right next to their anchor turn a lot without meaning anything.
+                    if off.length() > 0.5 {
+                        v.push((b, a as usize, off));
+                    }
+                }
+                v
+            },
+            max_flip_deg: 0.0,
+            flipped_bones: Vec::new(),
+            flip_events: 0,
+            last_flip: Vec::new(),
             tear_run: 0,
             flip_run: 0,
             torn: 0,
@@ -668,16 +719,43 @@ impl Physics {
                 flipped += 1;
             }
         }
+        // Flips seen from each part's anchor (catches a whole skirt swinging up over the hip).
+        let mut max_deg = 0.0f32;
+        let mut flipped_bones = Vec::new();
+        for &(b, anc, rest) in &self.chain_anchor {
+            let local = skel.states[anc].global.inverse().transform_point3(skel.states[b].global.w_axis.truncate());
+            if !local.is_finite() || local.length_squared() < 1e-8 {
+                continue;
+            }
+            let cos = local.normalize().dot(rest.normalize()).clamp(-1.0, 1.0);
+            let deg = cos.acos().to_degrees();
+            max_deg = max_deg.max(deg);
+            // Turned right round, or a part that hangs below its anchor (skirt under the hip)
+            // now sitting above it.
+            let above = rest.y < -0.5 && local.y > 0.0;
+            if deg > FLIP_DEG || above {
+                flipped_bones.push(b);
+            }
+        }
+        self.max_flip_deg = max_deg;
+        flipped = flipped.max(flipped_bones.len());
+        self.flipped_bones = flipped_bones;
         self.torn = torn;
         self.flipped = flipped;
         let need = (links / 20).max(2);
         self.tear_run = if torn >= need { self.tear_run + 1 } else { 0 };
         self.flip_run = if flipped >= need { self.flip_run + 1 } else { 0 };
-        if self.tear_run >= 10 || self.flip_run >= 30 {
+        // Torn chains are a blow-up: put everything back on its bones.
+        if self.tear_run >= 10 {
             self.tear_run = 0;
             self.flip_run = 0;
             self.reset(skel);
             self.blowups += 1;
+        }
+        // A flip held for half a second is reported once (the Physics window shows it).
+        if self.flip_run == 30 {
+            self.flip_events += 1;
+            self.last_flip = self.flipped_bones.clone();
         }
     }
 

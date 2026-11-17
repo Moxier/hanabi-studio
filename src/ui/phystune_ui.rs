@@ -147,6 +147,30 @@ impl App {
                 }
                 ui.label(RichText::new(format!("{} step(s)", self.phys_undo.len())).size(10.5).color(theme::TEXT_DIM));
             });
+            // Flips: a skirt or hair chain stayed turned over (left as it is, but worth a look).
+            let flips: u32 = self.scene.models.iter().filter_map(|m| m.physics.as_ref().map(|p| p.flip_events)).sum();
+            if flips > self.phys_flips_seen {
+                let parts: Vec<String> = self
+                    .scene
+                    .models
+                    .iter()
+                    .filter_map(|m| m.physics.as_ref().filter(|p| p.flip_events > 0).map(|p| p.last_flip.iter().take(6).filter_map(|&b| m.data.bones.get(b).map(|x| x.name.clone())).collect::<Vec<_>>()))
+                    .flatten()
+                    .collect();
+                egui::Frame::new().fill(Color32::from_rgb(55, 45, 25)).stroke(egui::Stroke::new(1.0, theme::KEY)).corner_radius(egui::CornerRadius::same(6)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(format!("⚠ Part of a skirt or hair turned over and stayed there (frame {:.0}): {}", self.scene.frame, parts.join(", "))).color(Color32::from_rgb(255, 225, 160)));
+                    ui.label(RichText::new("Usually the legs or arms push it up. In Parts, try “no collision” with the legs' group for the upper rows, or let the joints swing further.").size(10.5).color(theme::TEXT_DIM));
+                    ui.horizontal(|ui| {
+                        if ui.button("⟲ Reset to animation pose").clicked() {
+                            self.scene.force_reset_physics();
+                        }
+                        if ui.button("Dismiss").clicked() {
+                            self.phys_flips_seen = flips;
+                        }
+                    });
+                });
+            }
             // Warnings with a way back
             let blown: u32 = self.scene.models.iter().filter_map(|m| m.physics.as_ref().map(|p| p.blowups)).sum();
             if blown > self.phys_blowups_seen || self.phys_warning.is_some() {
