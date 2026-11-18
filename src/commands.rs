@@ -356,6 +356,9 @@ impl App {
                     return Err("a render is already running".into());
                 }
                 let p = PathBuf::from(s("path").ok_or("path is required")?);
+                if !p.is_absolute() {
+                    return Err(format!("path must be absolute (got “{}”)", p.display()));
+                }
                 let rs = &mut self.render_settings;
                 rs.path = p.clone();
                 rs.format = match p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {

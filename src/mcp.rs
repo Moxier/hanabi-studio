@@ -125,10 +125,43 @@ pub fn handle_message(msg: &Value, tx: &Sender<ToolCall>) -> Option<Value> {
     })
 }
 
+/// Is this a local address ("localhost", "127.0.0.1" or "[::1]", with an optional port)?
+fn is_local_host(h: &str) -> bool {
+    let h = h.trim();
+    let host = if let Some(rest) = h.strip_prefix('[') {
+        // [::1]:7860
+        match rest.split_once(']') {
+            Some((inside, after)) if after.is_empty() || after.starts_with(':') => inside,
+            _ => return false,
+        }
+    } else {
+        h.split(':').next().unwrap_or("")
+    };
+    let port_ok = match h.rsplit_once(':') {
+        Some((before, port)) if !h.starts_with('[') || before.ends_with(']') => port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty(),
+        _ => true,
+    };
+    port_ok && matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+/// Browser pages may only call the studio from a local page; anything else (other sites,
+/// look-alike names such as localhost.example.com, sandboxed frames and local files that
+/// send "null") is refused. Programs that send no Origin at all (AI clients) are allowed.
+fn origin_allowed(origin: &str) -> bool {
+    let o = origin.trim();
+    let rest = match o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")) {
+        Some(r) => r,
+        None => return false,
+    };
+    !rest.contains('/') && is_local_host(rest)
+}
+
 fn serve_http(stream: TcpStream, tx: Sender<ToolCall>) {
     let mut stream = stream;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
-    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let Ok(clone) = stream.try_clone() else { return };
+    // A request (headers + body) can't be bigger than 17 MB, so it can't eat memory.
+    let mut reader = BufReader::new(clone.take(17 * 1024 * 1024));
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() {
         return;
@@ -138,22 +171,30 @@ fn serve_http(stream: TcpStream, tx: Sender<ToolCall>) {
     let path = parts.next().unwrap_or("").to_string();
     let mut len = 0usize;
     let mut origin_ok = true;
+    let mut host_ok = true;
+    let mut headers = 0;
     loop {
         let mut h = String::new();
         if reader.read_line(&mut h).is_err() || h == "\r\n" || h.is_empty() {
             break;
+        }
+        headers += 1;
+        if headers > 100 {
+            return;
         }
         let lower = h.to_ascii_lowercase();
         if let Some(v) = lower.strip_prefix("content-length:") {
             len = v.trim().parse().unwrap_or(0);
         }
         if let Some(v) = lower.strip_prefix("origin:") {
-            let v = v.trim();
-            // Protect against DNS-rebinding: only local pages may call us from a browser.
-            origin_ok = v.starts_with("http://localhost") || v.starts_with("http://127.0.0.1") || v == "null";
+            origin_ok = origin_allowed(v);
+        }
+        // DNS rebinding: a page on another name resolving to 127.0.0.1 still sends its own Host.
+        if let Some(v) = lower.strip_prefix("host:") {
+            host_ok = is_local_host(v);
         }
     }
-    if !origin_ok {
+    if !origin_ok || !host_ok {
         http_reply(&mut stream, "403 Forbidden", "{}", false);
         return;
     }
@@ -170,7 +211,11 @@ fn serve_http(stream: TcpStream, tx: Sender<ToolCall>) {
         http_reply(&mut stream, "404 Not Found", "{}", false);
         return;
     }
-    let mut body = vec![0u8; len.min(16 * 1024 * 1024)];
+    if len > 16 * 1024 * 1024 {
+        http_reply(&mut stream, "413 Payload Too Large", "{}", false);
+        return;
+    }
+    let mut body = vec![0u8; len];
     if reader.read_exact(&mut body).is_err() {
         return;
     }
@@ -247,5 +292,20 @@ impl Mcp {
         }
         drop(tx);
         Self { rx, port: bound, calls: 0 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn origins() {
+        for ok in ["http://localhost", "http://localhost:3000", "http://127.0.0.1:7860", "http://[::1]:8080", "https://localhost"] {
+            assert!(origin_allowed(ok), "{ok}");
+        }
+        for bad in ["null", "http://localhost.evil.com", "http://127.0.0.1.evil.com", "http://evil.com", "file://", "http://localhost@evil.com", "http://localhost:80/x", "http://[::1].evil:1"] {
+            assert!(!origin_allowed(bad), "{bad}");
+        }
+        assert!(is_local_host("127.0.0.1:7860") && is_local_host("localhost") && !is_local_host("evil.com:7860") && !is_local_host("localhost.evil.com"));
     }
 }

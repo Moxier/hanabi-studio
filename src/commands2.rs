@@ -787,7 +787,13 @@ impl App {
                 if let Some(v) = ob("include_audio") { r.include_audio = v; }
                 if let Some(v) = ob("msaa") { r.msaa = v; }
                 if let Some(v) = ob("open_when_done") { r.open_when_done = v; }
-                if let Some(p) = s("path") { r.path = std::path::PathBuf::from(p); }
+                if let Some(p) = s("path") {
+                    let pb = std::path::PathBuf::from(p);
+                    if !pb.is_absolute() {
+                        return Err(format!("path must be absolute (got “{}”)", pb.display()));
+                    }
+                    r.path = pb;
+                }
                 if let Some(f) = s("format") {
                     use crate::export::OutFormat;
                     r.format = match f.as_str() {

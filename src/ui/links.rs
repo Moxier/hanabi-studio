@@ -15,7 +15,9 @@ pub fn open_external(target: &std::ffi::OsStr) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("cmd").arg("/C").arg("start").arg("").arg(target).creation_flags(0x0800_0000).spawn();
+        // explorer.exe opens files, folders and web links with their default program without
+        // going through a command shell (cmd /C start would run anything after an "&" in a name).
+        let _ = std::process::Command::new("explorer.exe").arg(target).creation_flags(0x0800_0000).spawn();
     }
     #[cfg(target_os = "macos")]
     {
@@ -28,5 +30,9 @@ pub fn open_external(target: &std::ffi::OsStr) {
 }
 
 pub fn open_url(url: &str) {
+    // Only web links are opened this way.
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
     open_external(std::ffi::OsStr::new(url));
 }

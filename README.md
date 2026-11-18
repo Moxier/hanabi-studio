@@ -46,7 +46,7 @@ The 59 tools cover what the app can do:
 * **Look:** effect presets and nodes, `set_material`, `set_material_type`, `add_light`, `set_color_grade` (wheels, looks, `.cube` LUTs).
 * **Render:** `get_render_settings`, `set_render_settings`, `render_image`, `render_video`, `cancel_render`.
 
-Actions that delete things need `confirm=true`. `--quit-after <seconds>` closes the app by itself, for automated tests.
+Actions that delete things need `confirm=true`. The server only listens on this computer and refuses requests from web pages; see `SECURITY.md`. Start with `--mcp-port 0` to turn it off. `--quit-after <seconds>` closes the app by itself, for automated tests.
 
 ## Build
 
