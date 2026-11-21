@@ -5,6 +5,9 @@ familiar to people who animate characters with PMX/PMD models and VMD motions.
 It is **not** MMD and contains no code, data or artwork from MMD or from any
 third-party effect pack. The file formats are implemented from their published layouts.
 
+**the project is still in very alpha state, lack of feature and you might experience some bugs
+
+
 ## Workspaces
 
 | Workspace | What it does |
